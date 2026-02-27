@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.platform.idgen.infrastructure.persistence.mapper.WorkerIdAllocMapper">
+
+    <!-- 抢占空闲 Worker ID：优先选择 released 状态，其次选择租约过期的 active 记录 -->
+    <select id="selectAvailableWorkerId" resultType="java.lang.Integer">
+        SELECT worker_id
+        FROM worker_id_alloc
+        WHERE status = 'released'
+           OR (status = 'active' AND lease_time &lt; NOW() - CAST(#{leaseTimeoutMinutes} || ' minutes' AS INTERVAL))
+        ORDER BY worker_id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    </select>
+
+    <!-- 占用 Worker ID：更新状态为 active，记录实例标识和租约时间 -->
+    <update id="acquireWorkerId">
+        UPDATE worker_id_alloc
+        SET status      = 'active',
+            instance_id = #{instanceId},
+            lease_time  = NOW()
+        WHERE worker_id = #{workerId}
+    </update>
+
+    <!-- 续期：更新 lease_time，校验 instance_id 防止误续他人持有的 Worker ID -->
+    <update id="renewLease">
+        UPDATE worker_id_alloc
+        SET lease_time = NOW()
+        WHERE worker_id = #{workerId}
+          AND instance_id = #{instanceId}
+          AND status = 'active'
+    </update>
+
+    <!-- 释放 Worker ID：状态改为 released，清空实例标识 -->
+    <update id="releaseWorkerId">
+        UPDATE worker_id_alloc
+        SET status      = 'released',
+            instance_id = ''
+        WHERE worker_id = #{workerId}
+    </update>
+
+</mapper>
