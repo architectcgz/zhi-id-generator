@@ -1,0 +1,26 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: id-generator-example
+
+# ID Generator Client Configuration
+id-generator:
+  client:
+    enabled: true
+    server-url: http://localhost:8010
+    connect-timeout-ms: 5000
+    read-timeout-ms: 5000
+    max-retries: 3
+    buffer-enabled: true
+    buffer-size: 100
+    refill-threshold: 20
+    batch-fetch-size: 50
+    async-refill: true
+
+logging:
+  level:
+    root: INFO
+    com.platform.example: DEBUG
+    com.platform.idgen.client: DEBUG

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.platform.idgen.mapper.LeafAllocMapper">
+    
+    <resultMap id="LeafAllocResultMap" type="com.platform.idgen.model.LeafAlloc">
+        <id property="bizTag" column="biz_tag"/>
+        <result property="maxId" column="max_id"/>
+        <result property="step" column="step"/>
+        <result property="description" column="description"/>
+        <result property="updateTime" column="update_time"/>
+        <result property="version" column="version"/>
+    </resultMap>
+    
+    <!-- Find all business tags -->
+    <select id="findAll" resultMap="LeafAllocResultMap">
+        SELECT biz_tag, max_id, step, description, update_time, version
+        FROM leaf_alloc
+        ORDER BY biz_tag
+    </select>
+    
+    <!-- Find by business tag -->
+    <select id="findByBizTag" resultMap="LeafAllocResultMap">
+        SELECT biz_tag, max_id, step, description, update_time, version
+        FROM leaf_alloc
+        WHERE biz_tag = #{bizTag}
+    </select>
+    
+    <!-- Update max_id with optimistic locking -->
+    <update id="updateMaxIdWithLock">
+        UPDATE leaf_alloc
+        SET max_id = max_id + #{step},
+            update_time = CURRENT_TIMESTAMP,
+            version = version + 1
+        WHERE biz_tag = #{bizTag}
+          AND version = #{version}
+    </update>
+    
+    <!-- Insert new record -->
+    <insert id="insert">
+        INSERT INTO leaf_alloc (biz_tag, max_id, step, description, update_time, version)
+        VALUES (#{bizTag}, #{maxId}, #{step}, #{description}, CURRENT_TIMESTAMP, 0)
+    </insert>
+    
+</mapper>

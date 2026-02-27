@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  id-generator-postgres:
+    image: postgres:16-alpine
+    container_name: id-generator-dev-postgres
+    environment:
+      POSTGRES_DB: id_generator
+      POSTGRES_USER: id_gen_user
+      POSTGRES_PASSWORD: id_gen_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./postgres/init-scripts/02-test-data.sql:/docker-entrypoint-initdb.d/02-test-data.sql:ro
+    networks:
+      - id-generator-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U id_gen_user -d id_generator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ZooKeeper
+  id-generator-zookeeper:
+    image: zookeeper:3.8
+    container_name: id-generator-dev-zookeeper
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: server.1=zookeeper:2888:3888;2181
+      ZOO_TICK_TIME: 2000
+      ZOO_INIT_LIMIT: 10
+      ZOO_SYNC_LIMIT: 5
+      ZOO_MAX_CLIENT_CNXNS: 60
+      ZOO_STANDALONE_ENABLED: true
+      ZOO_ADMINSERVER_ENABLED: true
+    ports:
+      - "2181:2181"
+      - "8888:8080"
+    volumes:
+      - zookeeper_data:/data
+      - zookeeper_datalog:/datalog
+      - zookeeper_logs:/logs
+    networks:
+      - id-generator-network
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ID Generator Server (optional - for local testing)
+  id-generator-server:
+    build:
+      context: ..
+      dockerfile: id-generator-server/Dockerfile
+    container_name: id-generator-dev-server
+    environment:
+      DB_HOST: id-generator-postgres
+      DB_PORT: 5432
+      DB_USER: id_gen_user
+      DB_PASSWORD: id_gen_password
+      ZOOKEEPER_CONNECTION_STRING: id-generator-zookeeper:2181
+      DATACENTER_ID: 0
+      WORKER_ID: -1
+      ENABLE_ZOOKEEPER: true
+      SPRING_PROFILES_ACTIVE: docker
+    ports:
+      - "8010:8010"
+    depends_on:
+      id-generator-postgres:
+        condition: service_healthy
+      id-generator-zookeeper:
+        condition: service_healthy
+    networks:
+      - id-generator-network
+    restart: unless-stopped
+    profiles:
+      - full
+
+volumes:
+  postgres_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  zookeeper_datalog:
+    driver: local
+  zookeeper_logs:
+    driver: local
+
+networks:
+  id-generator-network:
+    driver: bridge
