@@ -10,6 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import java.util.Map;
+
 /**
  * 全局异常处理器，统一使用 ApiResponse 格式返回错误响应。
  */
@@ -36,7 +38,8 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleClockBackwardsException(ClockBackwardsException e) {
         log.error("Clock backwards detected: offset={}ms", e.getOffset());
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(ApiResponse.error(50001, "CLOCK_BACKWARDS", e.getMessage()));
+                .body(ApiResponse.<Void>error(50001, "CLOCK_BACKWARDS", e.getMessage())
+                        .withExtra(Map.of("offset", e.getOffset())));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

@@ -101,6 +101,14 @@ public class SnowflakeProperties {
         @NotNull(message = "Alert threshold cannot be null")
         @Min(value = 0, message = "Alert threshold must be non-negative")
         private Long alertThresholdMs = 10L;
+
+        /**
+         * 启动时等待缓存时间戳追赶的最大毫秒数。
+         * 超过此值认为缓存时间戳异常，直接使用当前时间。
+         */
+        @NotNull(message = "Max startup wait time cannot be null")
+        @Min(value = 0, message = "Max startup wait time must be non-negative")
+        private Long maxStartupWaitMs = 5000L;
         
         // Getters and Setters
         public Long getMaxWaitMs() {
@@ -133,6 +141,14 @@ public class SnowflakeProperties {
         
         public void setAlertThresholdMs(Long alertThresholdMs) {
             this.alertThresholdMs = alertThresholdMs;
+        }
+
+        public Long getMaxStartupWaitMs() {
+            return maxStartupWaitMs;
+        }
+
+        public void setMaxStartupWaitMs(Long maxStartupWaitMs) {
+            this.maxStartupWaitMs = maxStartupWaitMs;
         }
     }
     

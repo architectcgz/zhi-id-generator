@@ -61,6 +61,7 @@ public class SnowflakeWorker {
     
     // Clock backwards handling thresholds
     private static final long DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS = 5L;
+    private static final long DEFAULT_MAX_STARTUP_WAIT_MS = 5000L;
 
     // Immutable fields
     private final WorkerId workerId;
@@ -68,6 +69,7 @@ public class SnowflakeWorker {
     private final long epoch;
     private final WorkerTimestampCache cache;
     private final long clockBackwardsWaitThresholdMs;
+    private final long maxStartupWaitMs;
     
     // Mutable state (protected by synchronization)
     private long sequence = 0L;
@@ -82,14 +84,16 @@ public class SnowflakeWorker {
      * @param cache 时间戳缓存端口，用于持久化/恢复时间戳
      */
     public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch, WorkerTimestampCache cache) {
-        this(workerId, datacenterId, epoch, cache, DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS);
+        this(workerId, datacenterId, epoch, cache, DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS, DEFAULT_MAX_STARTUP_WAIT_MS);
     }
 
     /**
      * @param clockBackwardsWaitThresholdMs 时钟回拨等待阈值（毫秒），超过此值直接拒绝生成
+     * @param maxStartupWaitMs 启动时等待缓存时间戳追赶的最大毫秒数
      */
     public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch,
-                           WorkerTimestampCache cache, long clockBackwardsWaitThresholdMs) {
+                           WorkerTimestampCache cache, long clockBackwardsWaitThresholdMs,
+                           long maxStartupWaitMs) {
         if (epoch < 0) {
             throw new IllegalArgumentException("Epoch must be non-negative, but got: " + epoch);
         }
@@ -102,7 +106,8 @@ public class SnowflakeWorker {
         this.epoch = epoch;
         this.cache = cache;
         this.clockBackwardsWaitThresholdMs = clockBackwardsWaitThresholdMs;
-        
+        this.maxStartupWaitMs = maxStartupWaitMs;
+
         // Load cached timestamp for recovery after restart
         cache.loadLastUsedTimestamp().ifPresent(cachedTimestamp -> {
             this.lastTimestamp = cachedTimestamp;
@@ -113,9 +118,8 @@ public class SnowflakeWorker {
             long currentTimestamp = getCurrentTimestamp();
             if (currentTimestamp <= cachedTimestamp) {
                 long waitTime = cachedTimestamp - currentTimestamp + 1;
-                // 启动等待上限 5 秒，超过说明缓存时间戳异常，直接用当前时间
-                long maxStartupWaitMs = 5000L;
-                if (waitTime > maxStartupWaitMs) {
+                // 启动等待上限，超过说明缓存时间戳异常，直接用当前时间
+                if (waitTime > this.maxStartupWaitMs) {
                     log.warn("Startup wait time {}ms exceeds max {}ms, cached timestamp may be corrupted. Using current time.",
                             waitTime, maxStartupWaitMs);
                     this.lastTimestamp = currentTimestamp;

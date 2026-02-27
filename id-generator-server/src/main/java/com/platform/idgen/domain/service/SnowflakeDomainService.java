@@ -7,7 +7,6 @@ import com.platform.idgen.domain.model.valueobject.DatacenterId;
 import com.platform.idgen.domain.model.valueobject.SnowflakeId;
 import com.platform.idgen.domain.model.valueobject.WorkerId;
 import com.platform.idgen.domain.repository.WorkerIdRepository;
-import com.platform.idgen.domain.port.WorkerTimestampCache;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -17,6 +16,7 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -36,10 +36,12 @@ public class SnowflakeDomainService {
     private final String configServiceName;
     private final long configEpoch;
     private final long alertThresholdMs;
+    private final long clockBackwardsWaitThresholdMs;
+    private final long maxStartupWaitMs;
     
     private SnowflakeWorker worker;
     private volatile boolean accepting = true;
-    private final java.util.concurrent.atomic.AtomicInteger inFlightRequests = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final AtomicInteger inFlightRequests = new AtomicInteger(0);
     
     // Monitoring metrics
     private final Counter workerIdRegistrationSuccess;
@@ -54,13 +56,17 @@ public class SnowflakeDomainService {
                                    int configDatacenterId,
                                    String configServiceName,
                                    long configEpoch,
-                                   long alertThresholdMs) {
+                                   long alertThresholdMs,
+                                   long clockBackwardsWaitThresholdMs,
+                                   long maxStartupWaitMs) {
         this.workerIdRepository = workerIdRepository;
         this.meterRegistry = meterRegistry;
         this.configDatacenterId = configDatacenterId;
         this.configServiceName = configServiceName;
         this.configEpoch = configEpoch;
         this.alertThresholdMs = alertThresholdMs;
+        this.clockBackwardsWaitThresholdMs = clockBackwardsWaitThresholdMs;
+        this.maxStartupWaitMs = maxStartupWaitMs;
         
         // Initialize monitoring metrics
         this.workerIdRegistrationSuccess = Counter.builder("snowflake.workerid.registration.success")
@@ -133,20 +139,9 @@ public class SnowflakeDomainService {
                 log.info("No cached timestamp found, starting fresh");
             }
             
-            // 创建适配器，将 WorkerIdRepository 的时间戳方法适配为 WorkerTimestampCache 端口
-            WorkerTimestampCache cacheAdapter = new WorkerTimestampCache() {
-                @Override
-                public Optional<Long> loadLastUsedTimestamp() {
-                    return workerIdRepository.loadLastUsedTimestamp();
-                }
-
-                @Override
-                public void saveLastUsedTimestamp(long timestamp) {
-                    workerIdRepository.saveLastUsedTimestamp(timestamp);
-                }
-            };
-            
-            this.worker = new SnowflakeWorker(workerId, datacenterId, epoch, cacheAdapter);
+            // WorkerIdRepository 已继承 WorkerTimestampCache，直接传入即可
+            this.worker = new SnowflakeWorker(workerId, datacenterId, epoch,
+                    workerIdRepository, clockBackwardsWaitThresholdMs, maxStartupWaitMs);
             
             log.info("SnowflakeDomainService initialized successfully with WorkerId={}, DatacenterId={}", 
                      workerId.value(), datacenterId.value());
@@ -187,26 +182,25 @@ public class SnowflakeDomainService {
 
                     return result.getId();
                 } catch (ClockBackwardsException e) {
-                // Record clock backwards event
-                clockBackwardsCount.increment();
-                clockDriftMs.set(e.getOffset());
-                
-                // Check if offset exceeds alert threshold
-                long alertThreshold = this.alertThresholdMs;
-                if (e.getOffset() > alertThreshold) {
-                    // Log error for alerting system to catch
-                    log.error("[ALERT] Clock backwards detected: offset={}ms exceeds threshold={}ms. " +
-                             "This may indicate system clock issues. WorkerId={}, DatacenterId={}", 
-                             e.getOffset(), alertThreshold, 
-                             worker.getWorkerId().value(), worker.getDatacenterId().value());
-                } else {
-                    log.warn("Clock backwards detected: offset={}ms (within threshold={}ms)", 
-                            e.getOffset(), alertThreshold);
+                    // 记录时钟回拨事件
+                    clockBackwardsCount.increment();
+                    clockDriftMs.set(e.getOffset());
+
+                    // 检查回拨偏移是否超过告警阈值
+                    long alertThreshold = this.alertThresholdMs;
+                    if (e.getOffset() > alertThreshold) {
+                        log.error("[ALERT] Clock backwards detected: offset={}ms exceeds threshold={}ms. "
+                                        + "WorkerId={}, DatacenterId={}",
+                                e.getOffset(), alertThreshold,
+                                worker.getWorkerId().value(), worker.getDatacenterId().value());
+                    } else {
+                        log.warn("Clock backwards detected: offset={}ms (within threshold={}ms)",
+                                e.getOffset(), alertThreshold);
+                    }
+
+                    throw e;
                 }
-                
-                throw e;
-            }
-        });
+            });
         } finally {
             inFlightRequests.decrementAndGet();
         }

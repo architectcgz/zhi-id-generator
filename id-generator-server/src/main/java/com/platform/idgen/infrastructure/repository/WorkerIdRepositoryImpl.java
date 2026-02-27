@@ -198,15 +198,9 @@ public class WorkerIdRepositoryImpl implements WorkerIdRepository {
     
     @Override
     public void releaseWorkerId() {
-        if (curatorClient != null && zkNodePath != null) {
-            try {
-                String data = String.format("{\"timestamp\":%d,\"status\":\"offline\"}",
-                                           System.currentTimeMillis());
-                curatorClient.setData().forPath(zkNodePath, data.getBytes());
-                log.info("Marked ZooKeeper node as offline: {}", zkNodePath);
-            } catch (Exception e) {
-                log.warn("Failed to mark ZooKeeper node as offline", e);
-            }
+        // EPHEMERAL 节点会在会话结束时自动删除，无需手动标记 offline
+        if (zkNodePath != null) {
+            log.info("Releasing WorkerId, EPHEMERAL node will be auto-deleted on session close: {}", zkNodePath);
         }
         // 不在此处保存 lastTimestamp，由 SnowflakeDomainService.shutdown() 用精确值保存
     }

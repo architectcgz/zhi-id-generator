@@ -25,7 +25,9 @@ public class SnowflakeDomainServiceConfig {
                 snowflakeProperties.getDatacenterId(),
                 zkProperties.getServiceName(),
                 snowflakeProperties.getEpoch(),
-                snowflakeProperties.getClockBackwards().getAlertThresholdMs()
+                snowflakeProperties.getClockBackwards().getAlertThresholdMs(),
+                snowflakeProperties.getClockBackwards().getMaxWaitMs(),
+                snowflakeProperties.getClockBackwards().getMaxStartupWaitMs()
         );
     }
 }

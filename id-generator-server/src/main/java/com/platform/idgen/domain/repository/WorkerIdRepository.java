@@ -2,15 +2,17 @@ package com.platform.idgen.domain.repository;
 
 import com.platform.idgen.domain.exception.WorkerIdUnavailableException;
 import com.platform.idgen.domain.model.valueobject.WorkerId;
+import com.platform.idgen.domain.port.WorkerTimestampCache;
 
 import java.util.Optional;
 
 /**
  * WorkerId Repository Interface
- * 
+ *
  * Abstracts WorkerId registration, caching, and persistence operations.
+ * 继承 WorkerTimestampCache 以统一时间戳持久化接口，消除适配器。
  */
-public interface WorkerIdRepository {
+public interface WorkerIdRepository extends WorkerTimestampCache {
     
     /**
      * Register a WorkerId for service instance.
@@ -45,20 +47,4 @@ public interface WorkerIdRepository {
      * Called during graceful shutdown. Does not delete node to preserve WorkerId for restart.
      */
     void releaseWorkerId();
-    
-    /**
-     * Load last used timestamp from cache.
-     * Used for clock backwards detection and recovery.
-     * 
-     * @return Optional containing last used timestamp, empty if not found
-     */
-    Optional<Long> loadLastUsedTimestamp();
-    
-    /**
-     * Save last used timestamp to cache.
-     * Called periodically and during shutdown for recovery after restart.
-     * 
-     * @param timestamp the last timestamp used for ID generation
-     */
-    void saveLastUsedTimestamp(long timestamp);
 }
