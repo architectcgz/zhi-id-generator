@@ -7,9 +7,7 @@ import com.platform.idgen.domain.model.valueobject.DatacenterId;
 import com.platform.idgen.domain.model.valueobject.SnowflakeId;
 import com.platform.idgen.domain.model.valueobject.WorkerId;
 import com.platform.idgen.domain.repository.WorkerIdRepository;
-import com.platform.idgen.infrastructure.config.SnowflakeProperties;
-import com.platform.idgen.infrastructure.config.ZooKeeperProperties;
-import com.platform.idgen.infrastructure.zookeeper.WorkerIdCache;
+import com.platform.idgen.domain.port.WorkerTimestampCache;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -18,28 +16,30 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
-
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Snowflake ID Generation Domain Service
- * 
- * Manages the lifecycle of SnowflakeWorker and coordinates with WorkerIdRepository.
+ * Snowflake ID 生成领域服务。
+ * 管理 SnowflakeWorker 的生命周期，协调 WorkerIdRepository。
+ * 通过 SnowflakeDomainServiceConfig 装配，不直接依赖基础设施层。
  */
-@Service
 public class SnowflakeDomainService {
     
     private static final Logger log = LoggerFactory.getLogger(SnowflakeDomainService.class);
     
     private final WorkerIdRepository workerIdRepository;
     private final MeterRegistry meterRegistry;
-    private final SnowflakeProperties properties;
-    private final ZooKeeperProperties zkProperties;
+
+    // 从配置注入的原始值，避免领域层直接依赖基础设施层的 Properties 类
+    private final int configDatacenterId;
+    private final String configServiceName;
+    private final long configEpoch;
+    private final long alertThresholdMs;
     
     private SnowflakeWorker worker;
     private volatile boolean accepting = true;
+    private final java.util.concurrent.atomic.AtomicInteger inFlightRequests = new java.util.concurrent.atomic.AtomicInteger(0);
     
     // Monitoring metrics
     private final Counter workerIdRegistrationSuccess;
@@ -49,14 +49,18 @@ public class SnowflakeDomainService {
     private final Counter sequenceOverflowCount;
     private final Timer idGenerationLatency;
     
-    public SnowflakeDomainService(WorkerIdRepository workerIdRepository, 
+    public SnowflakeDomainService(WorkerIdRepository workerIdRepository,
                                    MeterRegistry meterRegistry,
-                                   SnowflakeProperties properties,
-                                   ZooKeeperProperties zkProperties) {
+                                   int configDatacenterId,
+                                   String configServiceName,
+                                   long configEpoch,
+                                   long alertThresholdMs) {
         this.workerIdRepository = workerIdRepository;
         this.meterRegistry = meterRegistry;
-        this.properties = properties;
-        this.zkProperties = zkProperties;
+        this.configDatacenterId = configDatacenterId;
+        this.configServiceName = configServiceName;
+        this.configEpoch = configEpoch;
+        this.alertThresholdMs = alertThresholdMs;
         
         // Initialize monitoring metrics
         this.workerIdRegistrationSuccess = Counter.builder("snowflake.workerid.registration.success")
@@ -91,11 +95,8 @@ public class SnowflakeDomainService {
     @PostConstruct
     public void autoInitialize() {
         try {
-            DatacenterId datacenterId = new DatacenterId(properties.getDatacenterId());
-            String serviceName = zkProperties.getServiceName();
-            long epoch = properties.getEpoch();
-            
-            initialize(datacenterId, serviceName, epoch);
+            DatacenterId datacenterId = new DatacenterId(configDatacenterId);
+            initialize(datacenterId, configServiceName, configEpoch);
         } catch (Exception e) {
             log.warn("Failed to auto-initialize SnowflakeDomainService: {}", e.getMessage());
             log.warn("Snowflake ID generation will not be available until manually initialized");
@@ -132,14 +133,13 @@ public class SnowflakeDomainService {
                 log.info("No cached timestamp found, starting fresh");
             }
             
-            // Create SnowflakeWorker instance
-            // Create adapter that makes WorkerIdRepository work as WorkerIdCache
-            WorkerIdCache cacheAdapter = new WorkerIdCache() {
+            // 创建适配器，将 WorkerIdRepository 的时间戳方法适配为 WorkerTimestampCache 端口
+            WorkerTimestampCache cacheAdapter = new WorkerTimestampCache() {
                 @Override
                 public Optional<Long> loadLastUsedTimestamp() {
                     return workerIdRepository.loadLastUsedTimestamp();
                 }
-                
+
                 @Override
                 public void saveLastUsedTimestamp(long timestamp) {
                     workerIdRepository.saveLastUsedTimestamp(timestamp);
@@ -169,33 +169,30 @@ public class SnowflakeDomainService {
             throw new IdGenerationException(IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
                     "Service is shutting down, not accepting new requests");
         }
-        
+
         if (worker == null) {
             throw new IdGenerationException(IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
                     "SnowflakeWorker not initialized");
         }
-        
-        return idGenerationLatency.record(() -> {
-            long startTime = System.currentTimeMillis();
-            try {
-                SnowflakeId id = worker.generateId();
-                long endTime = System.currentTimeMillis();
-                
-                // If generation took more than expected, might be due to sequence overflow
-                // (waiting for next millisecond) or clock backwards handling
-                if (endTime - startTime > 1) {
-                    // Heuristic - if it took more than 1ms, likely sequence overflow or clock wait
-                    sequenceOverflowCount.increment();
-                }
-                
-                return id;
-            } catch (ClockBackwardsException e) {
+
+        inFlightRequests.incrementAndGet();
+        try {
+            return idGenerationLatency.record(() -> {
+                try {
+                    SnowflakeWorker.GenerateResult result = worker.generateId();
+
+                    if (result.isSequenceOverflow()) {
+                        sequenceOverflowCount.increment();
+                    }
+
+                    return result.getId();
+                } catch (ClockBackwardsException e) {
                 // Record clock backwards event
                 clockBackwardsCount.increment();
                 clockDriftMs.set(e.getOffset());
                 
                 // Check if offset exceeds alert threshold
-                long alertThreshold = properties.getClockBackwards().getAlertThresholdMs();
+                long alertThreshold = this.alertThresholdMs;
                 if (e.getOffset() > alertThreshold) {
                     // Log error for alerting system to catch
                     log.error("[ALERT] Clock backwards detected: offset={}ms exceeds threshold={}ms. " +
@@ -210,8 +207,11 @@ public class SnowflakeDomainService {
                 throw e;
             }
         });
+        } finally {
+            inFlightRequests.decrementAndGet();
+        }
     }
-    
+
     /**
      * Parse a Snowflake ID into its components.
      * 
@@ -276,13 +276,21 @@ public class SnowflakeDomainService {
         accepting = false;
         log.info("Stopped accepting new ID generation requests");
         
-        // Step 2: Wait for in-flight requests (max 100ms)
-        try {
-            Thread.sleep(100);
-            log.info("Waited for in-flight requests to complete");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("Interrupted while waiting for in-flight requests", e);
+        // Step 2: 等待飞行中请求完成（最多 5 秒）
+        long deadline = System.currentTimeMillis() + 5000;
+        while (inFlightRequests.get() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while waiting for in-flight requests", e);
+                break;
+            }
+        }
+        if (inFlightRequests.get() > 0) {
+            log.warn("Shutdown timeout, {} requests still in-flight", inFlightRequests.get());
+        } else {
+            log.info("All in-flight requests completed");
         }
         
         // Step 3: Persist last used timestamp
