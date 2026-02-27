@@ -2,8 +2,8 @@ package com.platform.idgen.infrastructure.repository;
 
 import com.platform.idgen.domain.model.valueobject.BizTag;
 import com.platform.idgen.domain.repository.LeafAllocRepository;
-import com.platform.idgen.mapper.LeafAllocMapper;
-import com.platform.idgen.model.LeafAlloc;
+import com.platform.idgen.infrastructure.persistence.mapper.LeafAllocMapper;
+import com.platform.idgen.infrastructure.persistence.entity.LeafAlloc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;

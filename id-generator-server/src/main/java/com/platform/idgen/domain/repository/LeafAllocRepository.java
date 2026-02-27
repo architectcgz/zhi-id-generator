@@ -1,7 +1,7 @@
 package com.platform.idgen.domain.repository;
 
 import com.platform.idgen.domain.model.valueobject.BizTag;
-import com.platform.idgen.model.LeafAlloc;
+import com.platform.idgen.infrastructure.persistence.entity.LeafAlloc;
 
 import java.util.List;
 import java.util.Optional;
