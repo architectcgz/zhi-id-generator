@@ -8,6 +8,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 import org.springframework.validation.annotation.Validated;
 
+import java.time.Duration;
+
 /**
  * Snowflake ID Generator Configuration Properties
  * 
@@ -46,7 +48,7 @@ public class SnowflakeProperties {
      * When false, uses configured workerId value.
      */
     @NotNull(message = "Enable ZooKeeper flag cannot be null")
-    private Boolean enableZookeeper = true;
+    private Boolean enableZookeeper = false;
     
     /**
      * Local cache file path for Worker ID persistence.
@@ -64,6 +66,23 @@ public class SnowflakeProperties {
     @Min(value = 0, message = "Epoch must be a positive timestamp")
     private Long epoch = 1577808000000L;
     
+    /**
+     * Worker ID 租约超时时间。
+     * 超过此时间未续期的 active 记录视为过期，可被其他实例回收。
+     * 仅在 enable-zookeeper=false（数据库模式）时生效。
+     */
+    @NotNull(message = "Worker ID lease timeout cannot be null")
+    private Duration workerIdLeaseTimeout = Duration.ofMinutes(10);
+
+    /**
+     * Worker ID 租约续期间隔。
+     * 定时更新 lease_time 防止被其他实例回收。
+     * 建议设置为 lease-timeout 的 1/3 左右，确保续期频率足够。
+     * 仅在 enable-zookeeper=false（数据库模式）时生效。
+     */
+    @NotNull(message = "Worker ID renew interval cannot be null")
+    private Duration workerIdRenewInterval = Duration.ofMinutes(3);
+
     /**
      * Clock backwards configuration
      */
@@ -193,10 +212,26 @@ public class SnowflakeProperties {
         this.epoch = epoch;
     }
     
+    public Duration getWorkerIdLeaseTimeout() {
+        return workerIdLeaseTimeout;
+    }
+
+    public void setWorkerIdLeaseTimeout(Duration workerIdLeaseTimeout) {
+        this.workerIdLeaseTimeout = workerIdLeaseTimeout;
+    }
+
+    public Duration getWorkerIdRenewInterval() {
+        return workerIdRenewInterval;
+    }
+
+    public void setWorkerIdRenewInterval(Duration workerIdRenewInterval) {
+        this.workerIdRenewInterval = workerIdRenewInterval;
+    }
+
     public ClockBackwards getClockBackwards() {
         return clockBackwards;
     }
-    
+
     public void setClockBackwards(ClockBackwards clockBackwards) {
         this.clockBackwards = clockBackwards;
     }
