@@ -34,7 +34,7 @@ public class IdGeneratorProperties {
     /**
      * The ID Generator server URL.
      */
-    private String serverUrl = "http://localhost:8010";
+    private String serverUrl = "http://localhost:8011";
 
     /**
      * Connection timeout in milliseconds.

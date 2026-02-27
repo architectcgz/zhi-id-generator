@@ -14,7 +14,7 @@ package com.platform.idgen.client.config;
 public class IdGeneratorClientConfig {
 
     /** Default server URL */
-    public static final String DEFAULT_SERVER_URL = "http://localhost:8010";
+    public static final String DEFAULT_SERVER_URL = "http://localhost:8011";
 
     /** Default connection timeout in milliseconds */
     public static final int DEFAULT_CONNECT_TIMEOUT_MS = 5000;

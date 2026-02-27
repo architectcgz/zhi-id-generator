@@ -129,9 +129,9 @@ public class WorkerIdRepositoryImpl implements WorkerIdRepository {
                     .forPath(basePath);
         }
         
-        // Create sequential node
+        // 使用 EPHEMERAL_SEQUENTIAL 节点，会话结束自动删除，避免废弃节点堆积
         zkNodePath = curatorClient.create()
-                .withMode(CreateMode.PERSISTENT_SEQUENTIAL)
+                .withMode(CreateMode.EPHEMERAL_SEQUENTIAL)
                 .forPath(basePath + "/worker-", buildNodeData());
         
         // Extract sequence number from path
@@ -200,8 +200,7 @@ public class WorkerIdRepositoryImpl implements WorkerIdRepository {
     public void releaseWorkerId() {
         if (curatorClient != null && zkNodePath != null) {
             try {
-                // Update node status to offline
-                String data = String.format("{\"timestamp\":%d,\"status\":\"offline\"}", 
+                String data = String.format("{\"timestamp\":%d,\"status\":\"offline\"}",
                                            System.currentTimeMillis());
                 curatorClient.setData().forPath(zkNodePath, data.getBytes());
                 log.info("Marked ZooKeeper node as offline: {}", zkNodePath);
@@ -209,11 +208,7 @@ public class WorkerIdRepositoryImpl implements WorkerIdRepository {
                 log.warn("Failed to mark ZooKeeper node as offline", e);
             }
         }
-        
-        // Persist last timestamp before shutdown
-        if (registeredWorkerId != null) {
-            saveLastUsedTimestamp(System.currentTimeMillis());
-        }
+        // 不在此处保存 lastTimestamp，由 SnowflakeDomainService.shutdown() 用精确值保存
     }
     
     @Override

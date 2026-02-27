@@ -14,7 +14,6 @@ import org.springframework.validation.annotation.Validated;
  */
 @Component
 @ConfigurationProperties(prefix = "id-generator.zookeeper")
-@Validated
 public class ZooKeeperProperties {
     
     /**
