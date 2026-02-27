@@ -5,7 +5,7 @@ import com.platform.idgen.domain.model.aggregate.SegmentBuffer.Segment;
 import com.platform.idgen.domain.model.aggregate.SegmentBuffer.NextIdResult;
 import com.platform.idgen.domain.model.valueobject.BizTag;
 import com.platform.idgen.domain.repository.LeafAllocRepository;
-import com.platform.idgen.infrastructure.persistence.entity.LeafAlloc;
+import com.platform.idgen.domain.model.valueobject.SegmentAllocation;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -296,12 +296,12 @@ public class SegmentDomainService {
         log.info("Initializing buffer for bizTag: {}", bizTag.value());
         
         try {
-            // Load LeafAlloc from database
-            LeafAlloc leafAlloc = leafAllocRepository.findByBizTag(bizTag)
+            // 从数据库加载号段分配信息
+            SegmentAllocation allocation = leafAllocRepository.findByBizTag(bizTag)
                     .orElseThrow(() -> new RuntimeException("BizTag not found in database: " + bizTag.value()));
-            
+
             // Set minimum step from database config
-            buffer.setMinStep(leafAlloc.getStep());
+            buffer.setMinStep(allocation.getStep());
             buffer.setUpdateTimestamp(System.currentTimeMillis());
             
             // Load initial segment (current segment)
@@ -332,18 +332,18 @@ public class SegmentDomainService {
         dbUpdateLatency.record(() -> {
             try {
                 int stepToUse;
-                LeafAlloc leafAlloc;
-                
+                SegmentAllocation allocation;
+
                 if (!buffer.isInitOk()) {
                     // First initialization: use database configured step
-                    leafAlloc = leafAllocRepository.findByBizTag(bizTag)
+                    allocation = leafAllocRepository.findByBizTag(bizTag)
                             .orElseThrow(() -> new RuntimeException("BizTag not found: " + bizTag.value()));
-                    stepToUse = leafAlloc.getStep();
+                    stepToUse = allocation.getStep();
                     buffer.setMinStep(stepToUse);
                     buffer.setUpdateTimestamp(System.currentTimeMillis());
                     
                     // Update max_id in database with default step
-                    leafAlloc = leafAllocRepository.updateMaxId(bizTag);
+                    allocation = leafAllocRepository.updateMaxId(bizTag);
                     
                 } else {
                     // Dynamic step adjustment based on consumption rate
@@ -352,17 +352,16 @@ public class SegmentDomainService {
                     log.debug("Updating segment for bizTag: {} with step: {}", bizTag.value(), stepToUse);
                     
                     // Update max_id in database with calculated step
-                    leafAlloc = leafAllocRepository.updateMaxIdByCustomStep(bizTag, stepToUse);
+                    allocation = leafAllocRepository.updateMaxIdByCustomStep(bizTag, stepToUse);
                     
                     buffer.setUpdateTimestamp(System.currentTimeMillis());
                 }
                 
-                // Calculate segment range
-                // Segment range is [maxId - step, maxId)
-                long value = leafAlloc.getMaxId() - leafAlloc.getStep();
+                // 号段范围 [maxId - step, maxId)
+                long value = allocation.getMaxId() - allocation.getStep();
                 segment.getValue().set(value);
-                segment.setMax(leafAlloc.getMaxId());
-                segment.setStep(leafAlloc.getStep());
+                segment.setMax(allocation.getMaxId());
+                segment.setStep(allocation.getStep());
                 
                 log.info("Updated segment from database - bizTag: {}, segment: {}", bizTag.value(), segment);
                 

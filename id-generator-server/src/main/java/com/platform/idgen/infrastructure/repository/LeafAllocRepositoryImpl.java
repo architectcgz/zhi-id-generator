@@ -1,6 +1,7 @@
 package com.platform.idgen.infrastructure.repository;
 
 import com.platform.idgen.domain.model.valueobject.BizTag;
+import com.platform.idgen.domain.model.valueobject.SegmentAllocation;
 import com.platform.idgen.domain.repository.LeafAllocRepository;
 import com.platform.idgen.infrastructure.persistence.mapper.LeafAllocMapper;
 import com.platform.idgen.infrastructure.persistence.entity.LeafAlloc;
@@ -40,13 +41,13 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
     }
     
     @Override
-    public Optional<LeafAlloc> findByBizTag(BizTag bizTag) {
+    public Optional<SegmentAllocation> findByBizTag(BizTag bizTag) {
         LeafAlloc alloc = mapper.findByBizTag(bizTag.value());
-        return Optional.ofNullable(alloc);
+        return Optional.ofNullable(alloc).map(this::toSegmentAllocation);
     }
     
     @Override
-    public LeafAlloc updateMaxId(BizTag bizTag) {
+    public SegmentAllocation updateMaxId(BizTag bizTag) {
         LeafAlloc current = mapper.findByBizTag(bizTag.value());
         if (current == null) {
             throw new RuntimeException("BizTag not found: " + bizTag.value());
@@ -55,7 +56,7 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
     }
     
     @Override
-    public LeafAlloc updateMaxIdByCustomStep(BizTag bizTag, int step) {
+    public SegmentAllocation updateMaxIdByCustomStep(BizTag bizTag, int step) {
         for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
             // Read current state
             LeafAlloc current = mapper.findByBizTag(bizTag.value());
@@ -67,11 +68,10 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
             int updated = mapper.updateMaxIdWithLock(bizTag.value(), step, current.getVersion());
             
             if (updated == 1) {
-                // Success - return updated entity
                 LeafAlloc result = mapper.findByBizTag(bizTag.value());
-                log.debug("Updated max_id for bizTag: {} to {}, step: {}", 
+                log.debug("Updated max_id for bizTag: {} to {}, step: {}",
                          bizTag.value(), result.getMaxId(), step);
-                return result;
+                return toSegmentAllocation(result);
             }
             
             // Optimistic lock conflict - retry
@@ -89,7 +89,11 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
             }
         }
         
-        throw new RuntimeException("Failed to update max_id after " + MAX_RETRY_ATTEMPTS + 
+        throw new RuntimeException("Failed to update max_id after " + MAX_RETRY_ATTEMPTS +
                                    " attempts for bizTag: " + bizTag.value());
+    }
+
+    private SegmentAllocation toSegmentAllocation(LeafAlloc alloc) {
+        return new SegmentAllocation(alloc.getBizTag(), alloc.getMaxId(), alloc.getStep());
     }
 }

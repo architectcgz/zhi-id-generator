@@ -330,38 +330,6 @@ public class SegmentBuffer {
     }
     
     /**
-     * Determine if next segment should be loaded asynchronously.
-     * 
-     * Triggers async loading when:
-     * 1. Next segment is not yet ready
-     * 2. No background thread is loading
-     * 3. Current segment idle capacity < 90% of step
-     * 
-     * This ensures next segment is ready before current exhausts.
-     * 
-     * @return true if next segment should be loaded, false otherwise
-     */
-    public boolean shouldLoadNextSegment() {
-        // Don't load if next is already ready
-        if (nextReady) {
-            return false;
-        }
-        
-        // Don't load if thread is already loading
-        if (threadRunning.get()) {
-            return false;
-        }
-        
-        // Check if current segment idle is below threshold
-        Segment currentSegment = getCurrentSegment();
-        long idle = currentSegment.getIdle();
-        int step = currentSegment.getStep();
-        
-        // Trigger when idle < 90% of step
-        return idle < (step * LOAD_THRESHOLD);
-    }
-    
-    /**
      * Switch from current segment to next segment.
      * 
      * This method:
