@@ -4,7 +4,7 @@ import com.platform.idgen.domain.exception.ClockBackwardsException;
 import com.platform.idgen.domain.model.valueobject.DatacenterId;
 import com.platform.idgen.domain.model.valueobject.SnowflakeId;
 import com.platform.idgen.domain.model.valueobject.WorkerId;
-import com.platform.idgen.infrastructure.zookeeper.WorkerIdCache;
+import com.platform.idgen.domain.port.WorkerTimestampCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,8 +24,25 @@ import org.slf4j.LoggerFactory;
  * Thread Safety: This class is thread-safe. The generateId() method is synchronized.
  */
 public class SnowflakeWorker {
-    
+
     private static final Logger log = LoggerFactory.getLogger(SnowflakeWorker.class);
+
+    /**
+     * generateId() 的返回结果，包含生成的 ID 和是否发生了 sequence overflow
+     */
+    public static class GenerateResult {
+        private final SnowflakeId id;
+        private final boolean sequenceOverflow;
+
+        public GenerateResult(SnowflakeId id, boolean sequenceOverflow) {
+            this.id = id;
+            this.sequenceOverflow = sequenceOverflow;
+        }
+
+        public SnowflakeId getId() { return id; }
+        /** 是否因 sequence 溢出而等待了下一毫秒 */
+        public boolean isSequenceOverflow() { return sequenceOverflow; }
+    }
     
     // Bit allocations
     private static final long WORKER_ID_BITS = 5L;
@@ -43,13 +60,14 @@ public class SnowflakeWorker {
     private static final long TIMESTAMP_SHIFT = SEQUENCE_BITS + WORKER_ID_BITS + DATACENTER_ID_BITS;
     
     // Clock backwards handling thresholds
-    private static final long CLOCK_BACKWARDS_WAIT_THRESHOLD_MS = 5L;
-    
+    private static final long DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS = 5L;
+
     // Immutable fields
     private final WorkerId workerId;
     private final DatacenterId datacenterId;
     private final long epoch;
-    private final WorkerIdCache cache;
+    private final WorkerTimestampCache cache;
+    private final long clockBackwardsWaitThresholdMs;
     
     // Mutable state (protected by synchronization)
     private long sequence = 0L;
@@ -61,20 +79,29 @@ public class SnowflakeWorker {
      * @param workerId The worker ID (0-31)
      * @param datacenterId The datacenter ID (0-31)
      * @param epoch The epoch timestamp (milliseconds since 1970-01-01)
-     * @param cache The cache for persisting timestamps
+     * @param cache 时间戳缓存端口，用于持久化/恢复时间戳
      */
-    public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch, WorkerIdCache cache) {
+    public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch, WorkerTimestampCache cache) {
+        this(workerId, datacenterId, epoch, cache, DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS);
+    }
+
+    /**
+     * @param clockBackwardsWaitThresholdMs 时钟回拨等待阈值（毫秒），超过此值直接拒绝生成
+     */
+    public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch,
+                           WorkerTimestampCache cache, long clockBackwardsWaitThresholdMs) {
         if (epoch < 0) {
             throw new IllegalArgumentException("Epoch must be non-negative, but got: " + epoch);
         }
         if (cache == null) {
-            throw new IllegalArgumentException("WorkerIdCache cannot be null");
+            throw new IllegalArgumentException("WorkerTimestampCache cannot be null");
         }
-        
+
         this.workerId = workerId;
         this.datacenterId = datacenterId;
         this.epoch = epoch;
         this.cache = cache;
+        this.clockBackwardsWaitThresholdMs = clockBackwardsWaitThresholdMs;
         
         // Load cached timestamp for recovery after restart
         cache.loadLastUsedTimestamp().ifPresent(cachedTimestamp -> {
@@ -86,15 +113,23 @@ public class SnowflakeWorker {
             long currentTimestamp = getCurrentTimestamp();
             if (currentTimestamp <= cachedTimestamp) {
                 long waitTime = cachedTimestamp - currentTimestamp + 1;
-                log.info("Current timestamp ({}) <= cached timestamp ({}), waiting {}ms for next millisecond",
-                        currentTimestamp, cachedTimestamp, waitTime);
-                try {
-                    Thread.sleep(waitTime);
-                    this.lastTimestamp = getCurrentTimestamp();
-                    log.info("After waiting, updated lastTimestamp to: {}", this.lastTimestamp);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    log.warn("Interrupted while waiting for next millisecond during initialization", e);
+                // 启动等待上限 5 秒，超过说明缓存时间戳异常，直接用当前时间
+                long maxStartupWaitMs = 5000L;
+                if (waitTime > maxStartupWaitMs) {
+                    log.warn("Startup wait time {}ms exceeds max {}ms, cached timestamp may be corrupted. Using current time.",
+                            waitTime, maxStartupWaitMs);
+                    this.lastTimestamp = currentTimestamp;
+                } else {
+                    log.info("Current timestamp ({}) <= cached timestamp ({}), waiting {}ms for next millisecond",
+                            currentTimestamp, cachedTimestamp, waitTime);
+                    try {
+                        Thread.sleep(waitTime);
+                        this.lastTimestamp = getCurrentTimestamp();
+                        log.info("After waiting, updated lastTimestamp to: {}", this.lastTimestamp);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        log.warn("Interrupted while waiting for next millisecond during initialization", e);
+                    }
                 }
             }
         });
@@ -148,31 +183,33 @@ public class SnowflakeWorker {
      * - Clock backwards detection and recovery
      * - Sequence overflow handling
      * 
-     * @return A unique SnowflakeId
+     * @return GenerateResult 包含生成的 ID 和是否发生了 sequence overflow
      * @throws ClockBackwardsException if clock moves backwards significantly
      */
-    public synchronized SnowflakeId generateId() {
+    public synchronized GenerateResult generateId() {
         long currentTimestamp = getCurrentTimestamp();
-        
+        boolean overflow = false;
+
         // Validate timestamp and handle clock backwards
         validateTimestamp(currentTimestamp);
-        
+
         // Handle sequence within the same millisecond
         if (currentTimestamp == lastTimestamp) {
             sequence = (sequence + 1) & MAX_SEQUENCE;
-            
+
             if (sequence == 0) {
                 // Sequence overflow - wait for next millisecond
+                overflow = true;
                 currentTimestamp = waitForNextMillisecond(lastTimestamp);
             }
         } else {
             sequence = 0L;
         }
-        
+
         lastTimestamp = currentTimestamp;
-        
+
         long id = composeId(currentTimestamp, sequence);
-        return new SnowflakeId(id);
+        return new GenerateResult(new SnowflakeId(id), overflow);
     }
     
     /**
@@ -207,12 +244,12 @@ public class SnowflakeWorker {
      * @param offset The number of milliseconds the clock moved backwards
      */
     private void handleClockBackwards(long offset) {
-        log.warn("Clock moved backwards by {}ms. Last timestamp: {}, Current: {}", 
+        log.warn("Clock moved backwards by {}ms. Last timestamp: {}, Current: {}",
                  offset, lastTimestamp, getCurrentTimestamp());
-        
-        if (offset <= CLOCK_BACKWARDS_WAIT_THRESHOLD_MS) {
-            log.info("Clock drift is small ({}ms <= {}ms), waiting for clock to catch up", 
-                     offset, CLOCK_BACKWARDS_WAIT_THRESHOLD_MS);
+
+        if (offset <= clockBackwardsWaitThresholdMs) {
+            log.info("Clock drift is small ({}ms <= {}ms), waiting for clock to catch up",
+                     offset, clockBackwardsWaitThresholdMs);
             try {
                 Thread.sleep(offset);
             } catch (InterruptedException e) {
@@ -220,9 +257,11 @@ public class SnowflakeWorker {
                 throw new ClockBackwardsException(offset);
             }
         } else {
-            log.warn("Clock drift is large ({}ms > {}ms), using cached last timestamp to maintain availability", 
-                     offset, CLOCK_BACKWARDS_WAIT_THRESHOLD_MS);
+            // 大回拨直接拒绝生成，避免时间重叠区间产生重复 ID
+            log.error("Clock drift is large ({}ms > {}ms), refusing to generate ID to prevent duplicates",
+                     offset, clockBackwardsWaitThresholdMs);
             cache.saveLastUsedTimestamp(lastTimestamp);
+            throw new ClockBackwardsException(offset);
         }
     }
     
