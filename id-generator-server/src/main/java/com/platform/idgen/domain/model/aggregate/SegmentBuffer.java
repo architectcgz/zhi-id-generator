@@ -70,6 +70,25 @@ public class SegmentBuffer {
     private static final double LOAD_THRESHOLD = 0.9;
     
     /**
+     * nextId() 的返回结果，包含分配的 ID 和是否发生了 segment 切换、是否需要异步加载下一个 segment
+     */
+    public static class NextIdResult {
+        private final long id;
+        private final boolean segmentSwitched;
+        private final boolean shouldLoadNext;
+
+        public NextIdResult(long id, boolean segmentSwitched, boolean shouldLoadNext) {
+            this.id = id;
+            this.segmentSwitched = segmentSwitched;
+            this.shouldLoadNext = shouldLoadNext;
+        }
+
+        public long getId() { return id; }
+        public boolean isSegmentSwitched() { return segmentSwitched; }
+        public boolean isShouldLoadNext() { return shouldLoadNext; }
+    }
+
+    /**
      * Inner Segment class representing a single ID segment
      */
     public static class Segment {
@@ -253,61 +272,61 @@ public class SegmentBuffer {
     }
     
     /**
-     * Allocate next ID from current segment in a thread-safe manner.
-     * 
-     * This method:
-     * 1. Acquires read lock for thread safety
-     * 2. Gets current segment
-     * 3. Atomically increments and returns next ID
-     * 4. Checks if segment is exhausted and switches if needed
-     * 
-     * @return next available ID
-     * @throws IllegalStateException if buffer not initialized or segment exhausted
+     * 从当前 segment 分配下一个 ID（线程安全）。
+     *
+     * 使用写锁保证 segment 切换与 ID 分配的原子性，
+     * 消费 ID 之后在锁内检查是否需要异步加载下一个 segment，避免外部检查的竞态。
+     *
+     * @return NextIdResult 包含 ID 值、是否发生切换、是否需要异步加载
+     * @throws IllegalStateException 如果 buffer 未初始化或 segment 耗尽且备用未就绪
      */
-    public long nextId() {
+    public NextIdResult nextId() {
         if (!initOk) {
             throw new IllegalStateException("SegmentBuffer not initialized for bizTag: " + bizTag.value());
         }
-        
-        Lock readLock = rLock();
-        readLock.lock();
+
+        Lock writeLock = wLock();
+        writeLock.lock();
         try {
             Segment currentSegment = getCurrentSegment();
             long value = currentSegment.getValue().getAndIncrement();
-            
-            // Check if within segment max
-            if (value < currentSegment.getMax()) {
-                return value;
-            }
-            
-            // Current segment exhausted, need to switch
-            readLock.unlock();
-            Lock writeLock = wLock();
-            writeLock.lock();
-            try {
-                // Re-check after acquiring write lock
-                currentSegment = getCurrentSegment();
-                value = currentSegment.getValue().getAndIncrement();
-                
-                if (value < currentSegment.getMax()) {
-                    return value;
-                }
-                
-                // If next segment is ready, switch
+            boolean switched = false;
+
+            if (value >= currentSegment.getMax()) {
+                // 当前 segment 耗尽，尝试切换到备用 segment
                 if (nextReady) {
                     switchToNextSegment();
-                    return nextId(); // Recursively get ID from new segment
+                    switched = true;
+                    currentSegment = getCurrentSegment();
+                    value = currentSegment.getValue().getAndIncrement();
+                    if (value >= currentSegment.getMax()) {
+                        throw new IllegalStateException(
+                            "Current segment exhausted and next segment not ready for bizTag: " + bizTag.value());
+                    }
                 } else {
                     throw new IllegalStateException(
                         "Current segment exhausted and next segment not ready for bizTag: " + bizTag.value());
                 }
-            } finally {
-                writeLock.unlock();
-                readLock.lock(); // Re-acquire read lock before returning
             }
+
+            // 消费 ID 之后，在锁内检查是否需要触发异步加载
+            boolean needLoad = checkShouldLoadNextSegment(currentSegment);
+            return new NextIdResult(value, switched, needLoad);
         } finally {
-            readLock.unlock();
+            writeLock.unlock();
         }
+    }
+
+    /**
+     * 在锁内检查是否需要异步加载下一个 segment（仅供 nextId 内部调用）。
+     */
+    private boolean checkShouldLoadNextSegment(Segment currentSegment) {
+        if (nextReady || threadRunning.get()) {
+            return false;
+        }
+        long idle = currentSegment.getIdle();
+        int step = currentSegment.getStep();
+        return idle < (step * LOAD_THRESHOLD);
     }
     
     /**
