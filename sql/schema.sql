@@ -34,10 +34,10 @@ COMMENT ON COLUMN leaf_alloc.version IS 'Optimistic locking version';
 -- 预填 0-31 共 32 行，通过 SELECT ... FOR UPDATE SKIP LOCKED 抢占
 -- ============================================================
 CREATE TABLE IF NOT EXISTS worker_id_alloc (
-    worker_id   INTEGER     PRIMARY KEY,            -- Worker ID，取值范围 0-31
+    worker_id   INTEGER     PRIMARY KEY CHECK (worker_id >= 0 AND worker_id <= 31), -- Worker ID，取值范围 0-31
     instance_id VARCHAR(64) NOT NULL DEFAULT '',     -- 实例标识，格式为 IP:port
     lease_time  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 租约时间，用于过期回收
-    status      VARCHAR(16) NOT NULL DEFAULT 'released'         -- 状态：active / released
+    status      VARCHAR(16) NOT NULL DEFAULT 'released' CHECK (status IN ('active', 'released')) -- 状态：active / released
 );
 
 COMMENT ON TABLE worker_id_alloc IS 'Snowflake Worker ID 分配表，用于数据库方式分配 Worker ID';
