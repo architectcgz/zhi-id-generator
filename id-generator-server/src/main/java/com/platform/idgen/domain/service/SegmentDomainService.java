@@ -2,9 +2,10 @@ package com.platform.idgen.domain.service;
 
 import com.platform.idgen.domain.model.aggregate.SegmentBuffer;
 import com.platform.idgen.domain.model.aggregate.SegmentBuffer.Segment;
+import com.platform.idgen.domain.model.aggregate.SegmentBuffer.NextIdResult;
 import com.platform.idgen.domain.model.valueobject.BizTag;
 import com.platform.idgen.domain.repository.LeafAllocRepository;
-import com.platform.idgen.model.LeafAlloc;
+import com.platform.idgen.infrastructure.persistence.entity.LeafAlloc;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -13,8 +14,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,7 +30,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * - Implements dynamic step adjustment
  * - Handles segment initialization and updates
  */
-@Service
 public class SegmentDomainService {
     
     private static final Logger log = LoggerFactory.getLogger(SegmentDomainService.class);
@@ -58,19 +56,12 @@ public class SegmentDomainService {
      * Service initialization status
      */
     private volatile boolean initOk = false;
-    
-    // Configuration properties
-    @Value("${id-generator.segment.cache-update-interval:60}")
-    private int cacheUpdateInterval;
-    
-    @Value("${id-generator.segment.segment-duration:900000}")
-    private long segmentDuration;
-    
-    @Value("${id-generator.segment.max-step:1000000}")
-    private int maxStep;
-    
-    @Value("${id-generator.segment.update-thread-pool-size:5}")
-    private int updateThreadPoolSize;
+
+    // 通过构造函数注入的配置值
+    private final int cacheUpdateInterval;
+    private final long segmentDuration;
+    private final int maxStep;
+    private final int updateThreadPoolSize;
     
     // Monitoring metrics
     private final Counter bufferSwitchCount;
@@ -79,9 +70,18 @@ public class SegmentDomainService {
     private final AtomicLong cacheHitCount = new AtomicLong(0);
     private final AtomicLong cacheMissCount = new AtomicLong(0);
     
-    public SegmentDomainService(LeafAllocRepository leafAllocRepository, MeterRegistry meterRegistry) {
+    public SegmentDomainService(LeafAllocRepository leafAllocRepository,
+                                MeterRegistry meterRegistry,
+                                int cacheUpdateInterval,
+                                long segmentDuration,
+                                int maxStep,
+                                int updateThreadPoolSize) {
         this.leafAllocRepository = leafAllocRepository;
         this.meterRegistry = meterRegistry;
+        this.cacheUpdateInterval = cacheUpdateInterval;
+        this.segmentDuration = segmentDuration;
+        this.maxStep = maxStep;
+        this.updateThreadPoolSize = updateThreadPoolSize;
         
         // Initialize monitoring metrics
         this.bufferSwitchCount = Counter.builder("segment.buffer.switch.count")
@@ -269,25 +269,20 @@ public class SegmentDomainService {
             }
         }
         
-        // Check if should trigger async loading of next segment
-        if (buffer.shouldLoadNextSegment()) {
+        // 由 nextId() 内部在锁内检查是否需要异步加载，避免外部检查的竞态
+        SegmentBuffer.NextIdResult result = buffer.nextId();
+
+        // 根据 nextId 返回的标志触发异步加载
+        if (result.isShouldLoadNext()) {
             asyncLoadNextSegment(buffer);
         }
-        
-        // Check if buffer is switching segments
-        Segment currentSegment = buffer.getCurrentSegment();
-        
-        // Delegate to SegmentBuffer for thread-safe ID allocation
-        long id = buffer.nextId();
-        
-        // If segment switched, record metric
-        Segment newSegment = buffer.getCurrentSegment();
-        if (currentSegment != newSegment) {
+
+        if (result.isSegmentSwitched()) {
             bufferSwitchCount.increment();
             log.debug("Buffer switched segments for bizTag: {}", bizTag.value());
         }
-        
-        return id;
+
+        return result.getId();
     }
     
     /**
