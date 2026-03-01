@@ -47,4 +47,26 @@ public interface WorkerIdRepository extends WorkerTimestampCache {
      * Called during graceful shutdown. Does not delete node to preserve WorkerId for restart.
      */
     void releaseWorkerId();
+
+    /**
+     * 检查当前持有的 Worker ID 是否仍然有效。
+     * DB 模式下，续期连续失败达到阈值后返回 false，表示租约可能已被回收。
+     * ZK 模式下始终返回 true（由 ZooKeeper 会话保证有效性）。
+     *
+     * @return true 表示 Worker ID 有效，可继续生成 ID；false 表示存在冲突风险，应停止生成
+     */
+    default boolean isWorkerIdValid() {
+        return true;
+    }
+
+    /**
+     * 获取一个备用 Worker ID 用于时钟回拨切换。
+     * 消费后该备用 ID 从备用列表中移除，不可重复使用。
+     * ZK 模式不支持备用 ID，默认返回 empty。
+     *
+     * @return 备用 Worker ID，如果没有可用的备用 ID 则返回 Optional.empty()
+     */
+    default Optional<WorkerId> consumeBackupWorkerId() {
+        return Optional.empty();
+    }
 }

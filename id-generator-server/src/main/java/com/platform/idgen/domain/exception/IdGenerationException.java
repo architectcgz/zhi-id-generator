@@ -16,7 +16,9 @@ public class IdGenerationException extends RuntimeException {
         BIZ_TAG_NOT_EXISTS(40401, "Business tag does not exist"),
         SEGMENTS_NOT_READY(50302, "Both segments are not ready"),
         CLOCK_BACKWARDS(50001, "Clock moved backwards"),
-        WORKER_ID_UNAVAILABLE(50303, "WorkerId unavailable");
+        WORKER_ID_UNAVAILABLE(50303, "WorkerId unavailable"),
+        /** Worker ID 租约续期失败，当前 Worker ID 可能已被其他实例占用 */
+        WORKER_ID_INVALID(50304, "Worker ID is invalid, lease renewal failed");
         
         private final int code;
         private final String message;

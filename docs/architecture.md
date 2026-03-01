@@ -1,6 +1,6 @@
 # ID Generator 代码架构文档
 
-> 基于代码实际状态梳理，更新日期：2026-02-27
+> 基于代码实际状态梳理，更新日期：2026-03-01
 
 ## 1. 项目概览
 
@@ -69,7 +69,10 @@ id-generator-spring-boot-starter
 │   │   ├── SnowflakeDomainService.java       # 领域服务：Snowflake 生命周期管理
 │   │   └── SegmentDomainService.java         # 领域服务：Segment 缓冲管理
 │   ├── repository/
-│   │   ├── WorkerIdRepository.java           # 仓储接口：Worker ID 注册/缓存
+│   │   ├── WorkerIdRepository.java           # 仓储接口：Worker ID 注册/缓存/备用 ID 消费
+│   │   │                                     #   - registerWorkerId() / releaseWorkerId()
+│   │   │                                     #   - isWorkerIdValid()：DB 模式续期失败时返回 false
+│   │   │                                     #   - consumeBackupWorkerId()：消费备用 ID 用于回拨切换
 │   │   └── LeafAllocRepository.java          # 仓储接口：号段分配
 │   └── exception/
 │       ├── IdGenerationException.java
@@ -78,11 +81,15 @@ id-generator-spring-boot-starter
 │
 ├── infrastructure/          # 基础设施层 —— 外部依赖实现
 │   ├── config/
-│   │   ├── SnowflakeProperties.java          # Snowflake 配置属性
+│   │   ├── SnowflakeProperties.java          # Snowflake 配置属性（含 DB 模式租约参数）
 │   │   └── ZooKeeperProperties.java          # ZooKeeper 配置属性
 │   ├── repository/
-│   │   ├── WorkerIdRepositoryImpl.java       # ZooKeeper + 本地文件缓存
+│   │   ├── DbWorkerIdRepositoryImpl.java     # DB 模式：PostgreSQL 抢占 + 租约续期（默认）
+│   │   ├── WorkerIdRepositoryImpl.java       # ZK 模式：ZooKeeper + 本地文件缓存
 │   │   └── LeafAllocRepositoryImpl.java      # MyBatis 实现
+│   ├── persistence/
+│   │   └── mapper/
+│   │       └── WorkerIdAllocMapper.java      # Worker ID 分配表 MyBatis Mapper
 │   └── zookeeper/
 │       └── WorkerIdCache.java                # Worker ID 缓存接口
 │
@@ -121,9 +128,11 @@ id-generator-spring-boot-starter
 
 - `generateId()` 使用 `synchronized` 保证线程安全
 - 同毫秒内序列号溢出时，自旋等待下一毫秒（`waitForNextMillisecond`）
-- 时钟回拨处理策略：
-  - 偏移 ≤ 5ms：`Thread.sleep(offset)` 等待追上
-  - 偏移 > 5ms：使用缓存的 lastTimestamp 保持可用性，记录告警
+- 时钟回拨三级处理策略：
+  - 偏移 ≤ 5ms：`Thread.sleep(offset)` 等待时钟追上，继续生成
+  - 偏移 > 5ms 且有备用 Worker ID：`SnowflakeDomainService` 捕获 `ClockBackwardsException` 后调用 `workerIdRepository.consumeBackupWorkerId()`，切换到备用 Worker ID 并重置 `lastTimestamp`，重试生成（避免服务中断）
+  - 偏移 > 5ms 且无备用 Worker ID：拒绝生成，向调用方抛出 `ClockBackwardsException`
+- `workerId` 字段声明为 `volatile`，支持 `switchWorkerId()` 切换后对非 synchronized 读取的可见性
 - 启动时从本地文件恢复 lastTimestamp，避免重启后 ID 重复
 
 ### 4.2 Segment 双缓冲机制
@@ -153,7 +162,58 @@ id-generator-spring-boot-starter
 
 ## 5. Worker ID 注册与容灾
 
-`WorkerIdRepositoryImpl` 实现了三级降级策略：
+Worker ID 分配支持两种模式，通过 `id-generator.snowflake.enable-zookeeper` 切换：
+
+### 5.1 DB 模式（默认，enable-zookeeper=false）
+
+基于 PostgreSQL `worker_id_alloc` 表，通过 `SELECT ... FOR UPDATE SKIP LOCKED` 实现无锁抢占。
+
+**启动抢占流程：**
+
+```
+静态配置（worker-id >= 0）
+    │ 跳过 DB 抢占，直接使用
+    ▼
+SELECT FOR UPDATE SKIP LOCKED 抢占空闲 Worker ID
+    │ 成功
+    ├── UPDATE 状态为 active，记录 instance_id（IP:port）
+    ├── 预分配 backup-worker-id-count 个备用 Worker ID
+    ├── 启动租约续期定时任务（每 renew-interval 续期一次）
+    │
+    │ 失败（无可用 ID）
+    ▼
+本地文件缓存降级恢复（workerID.properties）
+    │ 失败
+    ▼
+抛出 WorkerIdUnavailableException
+```
+
+**租约续期机制：**
+
+- 定时任务（`worker-id-lease-renew` 守护线程）每 `worker-id-renew-interval`（默认 3 分钟）更新 `lease_time`
+- 同时续期主用 Worker ID 和所有备用 Worker ID
+- 续期失败时：备用 ID 从队列移除；主用 ID 连续失败 ≥ 2 次后标记 `workerIdInvalid=true`，`isWorkerIdValid()` 返回 false，上层停止生成 ID 防止冲突
+
+**备用 Worker ID 预分配机制：**
+
+- 启动时额外抢占 `backup-worker-id-count`（默认 1）个 Worker ID 作为备用
+- 备用 ID 存入 `ConcurrentLinkedQueue`，时钟回拨时通过 `consumeBackupWorkerId()` 消费
+- 消费时将备用 ID 提升为主用，旧主用 ID 立即释放归还数据库
+- 备用 ID 用完后不再补充，避免频繁抢占
+
+**优雅释放流程：**
+
+```
+@PreDestroy 触发
+    │
+    ├── 停止租约续期定时任务
+    ├── releaseWorkerId()：UPDATE status='released' WHERE worker_id=? AND instance_id=?
+    └── 释放所有备用 Worker ID（逐一 UPDATE status='released'）
+```
+
+### 5.2 ZK 模式（可选，enable-zookeeper=true）
+
+`WorkerIdRepositoryImpl` 实现三级降级策略：
 
 ```
 静态配置（worker-id >= 0）
@@ -173,6 +233,7 @@ ZooKeeper 顺序节点注册
 - WorkerId 计算：`sequenceNumber % 32`（取模映射到 0-31）
 - 本地缓存路径：由 `snowflake.worker-id-cache-path` 配置，默认 `/data/leaf/workerID.properties`
 - 缓存内容：workerId、datacenterId、zkSequenceNumber、lastTimestamp
+- ZK 模式不支持备用 Worker ID，`consumeBackupWorkerId()` 默认返回 `Optional.empty()`
 
 ## 6. 生命周期管理
 
@@ -308,6 +369,31 @@ id-generator-spring-boot-starter/
 
 ## 10. 数据库设计
 
+### worker_id_alloc 表（Snowflake DB 模式）
+
+```sql
+CREATE TABLE IF NOT EXISTS worker_id_alloc (
+    worker_id   INTEGER     PRIMARY KEY CHECK (worker_id >= 0 AND worker_id <= 31),
+    instance_id VARCHAR(64) NOT NULL DEFAULT '',
+    lease_time  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status      VARCHAR(16) NOT NULL DEFAULT 'released'
+                            CHECK (status IN ('active', 'released'))
+);
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| worker_id | INTEGER PK | Worker ID，取值 0-31，对应 Snowflake 算法的 worker 位 |
+| instance_id | VARCHAR(64) | 持有该 Worker ID 的实例标识，格式为 `IP:port` |
+| lease_time | TIMESTAMP | 最近一次租约续期时间，超过 `worker-id-lease-timeout` 视为过期可回收 |
+| status | VARCHAR(16) | 分配状态：`active`（已占用）/ `released`（空闲可分配） |
+
+- 预填 0-31 共 32 行，初始状态均为 `released`
+- 抢占：`SELECT worker_id FROM worker_id_alloc WHERE status='released' OR (status='active' AND lease_time < NOW() - INTERVAL '? minutes') FOR UPDATE SKIP LOCKED LIMIT 1`
+- 续期：`UPDATE worker_id_alloc SET lease_time=NOW() WHERE worker_id=? AND instance_id=?`
+- 释放：`UPDATE worker_id_alloc SET status='released', instance_id='' WHERE worker_id=? AND instance_id=?`
+- 并发控制：`FOR UPDATE SKIP LOCKED` 保证多实例同时启动时不阻塞，各自抢占不同 Worker ID
+
 ### leaf_alloc 表（Segment 模式）
 
 ```sql
@@ -335,6 +421,7 @@ CREATE TABLE leaf_alloc (
 |--------|------|------|
 | `snowflake.workerid.registration.success` | Counter | WorkerId 注册成功次数 |
 | `snowflake.workerid.registration.failure` | Counter | WorkerId 注册失败次数 |
+| `snowflake.workerid.switch.count` | Counter | 时钟回拨触发 Worker ID 切换次数 |
 | `snowflake.clock.drift.ms` | Gauge | 当前时钟偏移量（ms） |
 | `snowflake.clock.backwards.count` | Counter | 时钟回拨检测次数 |
 | `snowflake.sequence.overflow.count` | Counter | 序列号溢出次数 |
@@ -361,16 +448,23 @@ id-generator:
 
   snowflake:
     datacenter-id: 0                # 数据中心 ID（0-31）
-    worker-id: -1                   # -1 表示使用 ZooKeeper 自动分配
-    enable-zookeeper: true
+    worker-id: -1                   # -1 表示自动分配（DB 模式或 ZK 模式）
+    enable-zookeeper: false         # false=DB 模式（默认），true=ZK 模式
     worker-id-cache-path: /data/leaf/workerID.properties
     epoch: 1735689600000            # 自定义纪元（2025-01-01）
+
+    # DB 模式专属配置（enable-zookeeper=false 时生效）
+    worker-id-lease-timeout: 10m    # Worker ID 租约超时时间（默认 10 分钟）
+    worker-id-renew-interval: 3m    # 租约续期间隔（默认 3 分钟，建议为 timeout 的 1/3）
+    backup-worker-id-count: 1       # 预分配备用 Worker ID 数量（默认 1，用于时钟回拨切换）
+
     clock-backwards:
-      max-wait-ms: 5               # 时钟回拨最大等待
+      max-wait-ms: 5               # 时钟回拨最大等待（ms），超过则切换备用 ID 或拒绝
       startup-check-enabled: true
       zk-time-sync-interval: 3000
       alert-threshold-ms: 10       # 告警阈值
 
+  # ZK 模式配置（仅 enable-zookeeper=true 时需要）
   zookeeper:
     connection-string: localhost:2181
     session-timeout-ms: 60000

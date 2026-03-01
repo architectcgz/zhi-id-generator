@@ -3,17 +3,20 @@ package com.platform.idgen.infrastructure.config;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * ZooKeeper Configuration Properties
- * 
- * Configures ZooKeeper connection and retry settings for distributed Worker ID management.
+ * ZooKeeper 连接配置。
+ * 仅在 id-generator.snowflake.enable-zookeeper=true 时创建此 Bean，
+ * 避免禁用 ZK 时因缺少连接配置而触发校验失败。
  */
 @Component
+@ConditionalOnProperty(name = "id-generator.snowflake.enable-zookeeper", havingValue = "true")
 @ConfigurationProperties(prefix = "id-generator.zookeeper")
+@Validated
 public class ZooKeeperProperties {
     
     /**

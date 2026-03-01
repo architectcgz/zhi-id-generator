@@ -63,15 +63,16 @@ public class SnowflakeWorker {
     private static final long DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS = 5L;
     private static final long DEFAULT_MAX_STARTUP_WAIT_MS = 5000L;
 
-    // Immutable fields
-    private final WorkerId workerId;
+    // 不可变字段
     private final DatacenterId datacenterId;
     private final long epoch;
     private final WorkerTimestampCache cache;
     private final long clockBackwardsWaitThresholdMs;
     private final long maxStartupWaitMs;
-    
-    // Mutable state (protected by synchronization)
+
+    // 可变状态（由 synchronized 保护）
+    /** 当前使用的 Worker ID，时钟回拨时可通过 switchWorkerId 切换；volatile 保证非 synchronized 读取的可见性 */
+    private volatile WorkerId workerId;
     private long sequence = 0L;
     private long lastTimestamp = -1L;
     
@@ -145,16 +146,32 @@ public class SnowflakeWorker {
     /**
      * Get the last used timestamp
      * Used for persisting timestamp during shutdown
-     * 
+     *
      * @return The last timestamp used for ID generation
      */
     public long getLastTimestamp() {
         return lastTimestamp;
     }
-    
+
+    /**
+     * 运行时切换 Worker ID（用于时钟回拨场景）。
+     * 切换后重置 sequence 和 lastTimestamp，因为不同 Worker ID 的 ID 空间完全独立，
+     * 不存在时间重叠导致重复的风险。重置 lastTimestamp 后，切换后的首次生成不会
+     * 因旧 lastTimestamp 仍大于当前时间而再次触发 ClockBackwardsException。
+     *
+     * @param newWorkerId 新的 Worker ID
+     */
+    public synchronized void switchWorkerId(WorkerId newWorkerId) {
+        WorkerId oldWorkerId = this.workerId;
+        this.workerId = newWorkerId;
+        this.sequence = 0;
+        this.lastTimestamp = -1; // 新 Worker ID 空间独立，重置时间戳避免切换后重试再次触发异常
+        log.info("Worker ID 切换：{} -> {}", oldWorkerId.value(), newWorkerId.value());
+    }
+
     /**
      * Get the worker ID
-     * 
+     *
      * @return The worker ID
      */
     public WorkerId getWorkerId() {

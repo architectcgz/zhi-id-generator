@@ -50,6 +50,8 @@ public class SnowflakeDomainService {
     private final Counter clockBackwardsCount;
     private final Counter sequenceOverflowCount;
     private final Timer idGenerationLatency;
+    /** 时钟回拨触发 Worker ID 切换次数 */
+    private final Counter workerIdSwitchCount;
     
     public SnowflakeDomainService(WorkerIdRepository workerIdRepository,
                                    MeterRegistry meterRegistry,
@@ -91,6 +93,10 @@ public class SnowflakeDomainService {
         
         this.idGenerationLatency = Timer.builder("snowflake.id.generation.latency")
                 .description("ID generation latency")
+                .register(meterRegistry);
+
+        this.workerIdSwitchCount = Counter.builder("snowflake.workerid.switch.count")
+                .description("时钟回拨触发 Worker ID 切换次数")
                 .register(meterRegistry);
     }
     
@@ -170,6 +176,12 @@ public class SnowflakeDomainService {
                     "SnowflakeWorker not initialized");
         }
 
+        // DB 模式下，续期连续失败达到阈值后拒绝生成，防止与其他实例产生重复 ID
+        if (!workerIdRepository.isWorkerIdValid()) {
+            throw new IdGenerationException(IdGenerationException.ErrorCode.WORKER_ID_INVALID,
+                    "Worker ID 租约续期失败，当前 Worker ID 可能已被其他实例占用，拒绝生成 ID 以防止冲突");
+        }
+
         inFlightRequests.incrementAndGet();
         try {
             return idGenerationLatency.record(() -> {
@@ -198,6 +210,30 @@ public class SnowflakeDomainService {
                                 e.getOffset(), alertThreshold);
                     }
 
+                    // 尝试切换到备用 Worker ID，避免大回拨导致服务中断
+                    Optional<WorkerId> backupId = workerIdRepository.consumeBackupWorkerId();
+                    if (backupId.isPresent()) {
+                        worker.switchWorkerId(backupId.get());
+                        workerIdSwitchCount.increment();
+                        log.info("时钟回拨触发 Worker ID 切换，新 WorkerId={}，回拨偏移={}ms",
+                                backupId.get().value(), e.getOffset());
+                        // 切换后重新生成 ID，捕获重试失败（如切换后仍有异常）
+                        try {
+                            SnowflakeWorker.GenerateResult retryResult = worker.generateId();
+                            if (retryResult.isSequenceOverflow()) {
+                                sequenceOverflowCount.increment();
+                            }
+                            return retryResult.getId();
+                        } catch (Exception retryEx) {
+                            log.error("切换 Worker ID 后重试生成 ID 仍失败，WorkerId={}",
+                                    backupId.get().value(), retryEx);
+                            throw new IdGenerationException(IdGenerationException.ErrorCode.CLOCK_BACKWARDS,
+                                    "切换 Worker ID 后重试失败: " + retryEx.getMessage());
+                        }
+                    }
+
+                    // 无备用 ID，降级为拒绝策略
+                    log.error("时钟回拨且无备用 Worker ID 可用，拒绝生成 ID。回拨偏移={}ms", e.getOffset());
                     throw e;
                 }
             });

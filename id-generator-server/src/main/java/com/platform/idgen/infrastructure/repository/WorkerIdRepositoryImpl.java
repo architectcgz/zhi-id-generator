@@ -11,6 +11,7 @@ import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.zookeeper.CreateMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Repository;
 
 import jakarta.annotation.PostConstruct;
@@ -28,6 +29,7 @@ import java.util.Properties;
  * Manages WorkerId registration via ZooKeeper with local file cache fallback.
  */
 @Repository
+@ConditionalOnProperty(name = "id-generator.snowflake.enable-zookeeper", havingValue = "true")
 public class WorkerIdRepositoryImpl implements WorkerIdRepository {
     
     private static final Logger log = LoggerFactory.getLogger(WorkerIdRepositoryImpl.class);
