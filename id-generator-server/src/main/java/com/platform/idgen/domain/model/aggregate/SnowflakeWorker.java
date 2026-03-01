@@ -71,8 +71,8 @@ public class SnowflakeWorker {
     private final long maxStartupWaitMs;
 
     // 可变状态（由 synchronized 保护）
-    /** 当前使用的 Worker ID，时钟回拨时可通过 switchWorkerId 切换 */
-    private WorkerId workerId;
+    /** 当前使用的 Worker ID，时钟回拨时可通过 switchWorkerId 切换；volatile 保证非 synchronized 读取的可见性 */
+    private volatile WorkerId workerId;
     private long sequence = 0L;
     private long lastTimestamp = -1L;
     
