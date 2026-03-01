@@ -20,6 +20,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -59,8 +61,10 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         return thread;
     });
 
-    /** 当前持有的 Worker ID，未分配时为 null */
+    /** 当前持有的主用 Worker ID，未分配时为 null */
     private volatile WorkerId registeredWorkerId;
+    /** 备用 Worker ID 队列，用于时钟回拨时切换，线程安全 */
+    private final Queue<WorkerId> backupWorkerIds = new ConcurrentLinkedQueue<>();
     /** 当前实例标识（IP:port），用于续期校验 */
     private volatile String instanceId;
     /** 续期定时任务句柄 */
@@ -101,8 +105,13 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
                 registeredWorkerId = workerId;
                 // DB 模式下无 ZK 序列号，传 -1 标识
                 cacheWorkerId(workerId, snowflakeProperties.getDatacenterId(), -1);
+
+                // 预分配备用 Worker ID，用于时钟回拨时切换
+                acquireBackupWorkerIds();
+
                 startLeaseRenewal();
-                log.info("从数据库抢占 WorkerId: {}, 实例: {}", workerId.value(), instanceId);
+                log.info("从数据库抢占 WorkerId: {}, 实例: {}, 备用 ID 数量: {}",
+                        workerId.value(), instanceId, backupWorkerIds.size());
                 return workerId;
             }
         } catch (Exception e) {
@@ -149,6 +158,41 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     }
 
     /**
+     * 预分配备用 Worker ID，用于时钟回拨时切换。
+     * 按配置数量尝试抢占，抢占失败不影响主 Worker ID 的正常使用。
+     * 备用 ID 用完后不再补充，避免频繁抢占数据库。
+     */
+    private void acquireBackupWorkerIds() {
+        int backupCount = snowflakeProperties.getBackupWorkerIdCount();
+        if (backupCount <= 0) {
+            log.info("备用 Worker ID 数量配置为 {}，跳过预分配", backupCount);
+            return;
+        }
+
+        int acquired = 0;
+        for (int i = 0; i < backupCount; i++) {
+            try {
+                WorkerId backupId = acquireFromDatabase();
+                if (backupId != null) {
+                    backupWorkerIds.offer(backupId);
+                    acquired++;
+                    log.info("预分配备用 WorkerId: {}", backupId.value());
+                } else {
+                    log.warn("预分配备用 WorkerId 失败（第 {} 个），无可用 ID", i + 1);
+                    break;
+                }
+            } catch (Exception e) {
+                log.warn("预分配备用 WorkerId 异常（第 {} 个）", i + 1, e);
+                break;
+            }
+        }
+
+        if (acquired < backupCount) {
+            log.warn("备用 Worker ID 预分配不足：期望 {}，实际 {}", backupCount, acquired);
+        }
+    }
+
+    /**
      * 启动租约续期定时任务。
      * 按配置的间隔定时更新 lease_time，防止被其他实例回收。
      */
@@ -170,14 +214,16 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     }
 
     /**
-     * 执行一次租约续期。
-     * 连续失败达到 MAX_RENEW_FAIL_COUNT 后，将 workerIdInvalid 置为 true，
+     * 执行一次租约续期，同时续期主用 Worker ID 和所有备用 Worker ID。
+     * 主用 ID 续期连续失败达到 MAX_RENEW_FAIL_COUNT 后，将 workerIdInvalid 置为 true，
      * 上层服务应通过 isWorkerIdValid() 检查后拒绝继续生成 ID，防止 ID 冲突。
+     * 备用 ID 续期失败仅记录警告，不影响主用 ID 的有效性判断。
      */
     private void renewLease() {
         if (registeredWorkerId == null || instanceId == null) {
             return;
         }
+        // 续期主用 Worker ID
         try {
             int updated = workerIdAllocMapper.renewLease(registeredWorkerId.value(), instanceId);
             if (updated > 0) {
@@ -202,6 +248,20 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
                         registeredWorkerId.value(), failCount);
             }
         }
+
+        // 续期所有备用 Worker ID（失败仅记录警告，不影响主用 ID 有效性）
+        for (WorkerId backupId : backupWorkerIds) {
+            try {
+                int updated = workerIdAllocMapper.renewLease(backupId.value(), instanceId);
+                if (updated > 0) {
+                    log.debug("备用 WorkerId {} 租约续期成功", backupId.value());
+                } else {
+                    log.warn("备用 WorkerId {} 租约续期失败，可能已被回收", backupId.value());
+                }
+            } catch (Exception e) {
+                log.warn("备用 WorkerId {} 租约续期异常", backupId.value(), e);
+            }
+        }
     }
 
     @Override
@@ -213,19 +273,45 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     @PreDestroy
     public void releaseWorkerId() {
         stopLeaseRenewal();
+        // 释放主用 Worker ID
         if (registeredWorkerId != null && instanceId != null) {
             try {
                 int updated = workerIdAllocMapper.releaseWorkerId(registeredWorkerId.value(), instanceId);
                 if (updated > 0) {
-                    log.info("释放 WorkerId: {}", registeredWorkerId.value());
+                    log.info("释放主用 WorkerId: {}", registeredWorkerId.value());
                 } else {
-                    log.warn("释放 WorkerId {} 失败，可能已被其他实例占用", registeredWorkerId.value());
+                    log.warn("释放主用 WorkerId {} 失败，可能已被其他实例占用", registeredWorkerId.value());
                 }
             } catch (Exception e) {
-                log.warn("释放 WorkerId 失败: {}", registeredWorkerId.value(), e);
+                log.warn("释放主用 WorkerId 失败: {}", registeredWorkerId.value(), e);
+            }
+        }
+        // 释放所有备用 Worker ID
+        WorkerId backupId;
+        while ((backupId = backupWorkerIds.poll()) != null) {
+            try {
+                int updated = workerIdAllocMapper.releaseWorkerId(backupId.value(), instanceId);
+                if (updated > 0) {
+                    log.info("释放备用 WorkerId: {}", backupId.value());
+                } else {
+                    log.warn("释放备用 WorkerId {} 失败，可能已被其他实例占用", backupId.value());
+                }
+            } catch (Exception e) {
+                log.warn("释放备用 WorkerId 失败: {}", backupId.value(), e);
             }
         }
         scheduler.shutdown();
+    }
+
+    @Override
+    public Optional<WorkerId> consumeBackupWorkerId() {
+        WorkerId backupId = backupWorkerIds.poll();
+        if (backupId != null) {
+            log.info("消费备用 WorkerId: {}，剩余备用数量: {}", backupId.value(), backupWorkerIds.size());
+        } else {
+            log.warn("备用 Worker ID 已耗尽，无法切换");
+        }
+        return Optional.ofNullable(backupId);
     }
 
     @Override

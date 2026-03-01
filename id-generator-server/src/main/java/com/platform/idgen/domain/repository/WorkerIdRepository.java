@@ -58,4 +58,15 @@ public interface WorkerIdRepository extends WorkerTimestampCache {
     default boolean isWorkerIdValid() {
         return true;
     }
+
+    /**
+     * 获取一个备用 Worker ID 用于时钟回拨切换。
+     * 消费后该备用 ID 从备用列表中移除，不可重复使用。
+     * ZK 模式不支持备用 ID，默认返回 empty。
+     *
+     * @return 备用 Worker ID，如果没有可用的备用 ID 则返回 Optional.empty()
+     */
+    default Optional<WorkerId> consumeBackupWorkerId() {
+        return Optional.empty();
+    }
 }

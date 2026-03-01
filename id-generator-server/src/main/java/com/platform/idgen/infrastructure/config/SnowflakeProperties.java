@@ -84,6 +84,16 @@ public class SnowflakeProperties {
     private Duration workerIdRenewInterval = Duration.ofMinutes(3);
 
     /**
+     * 预分配的备用 Worker ID 数量（用于时钟回拨切换），默认 1。
+     * 启动时会额外抢占此数量的 Worker ID 作为备用，
+     * 当发生大回拨时切换到备用 ID 继续生成，避免服务中断。
+     * 仅在 enable-zookeeper=false（数据库模式）时生效。
+     * 配置路径：id-generator.snowflake.backup-worker-id-count
+     */
+    @Min(value = 0, message = "Backup worker ID count must be non-negative")
+    private int backupWorkerIdCount = 1;
+
+    /**
      * Clock backwards configuration
      */
     private ClockBackwards clockBackwards = new ClockBackwards();
@@ -234,5 +244,13 @@ public class SnowflakeProperties {
 
     public void setClockBackwards(ClockBackwards clockBackwards) {
         this.clockBackwards = clockBackwards;
+    }
+
+    public int getBackupWorkerIdCount() {
+        return backupWorkerIdCount;
+    }
+
+    public void setBackupWorkerIdCount(int backupWorkerIdCount) {
+        this.backupWorkerIdCount = backupWorkerIdCount;
     }
 }
