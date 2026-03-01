@@ -8,6 +8,7 @@ import com.platform.idgen.infrastructure.persistence.mapper.WorkerIdAllocMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 基于数据库的 Worker ID 分配实现。
@@ -40,8 +42,16 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     private static final String SEQUENCE_NUMBER_KEY = "zkSequenceNumber";
     private static final String LAST_TIMESTAMP_KEY = "lastTimestamp";
 
+    /**
+     * 续期连续失败阈值：超过此次数后标记 Worker ID 为无效，
+     * 防止租约已被回收的情况下继续生成可能重复的 ID。
+     */
+    private static final int MAX_RENEW_FAIL_COUNT = 2;
+
     private final SnowflakeProperties snowflakeProperties;
     private final WorkerIdAllocMapper workerIdAllocMapper;
+    /** Spring Environment，用于可靠获取 server.port 配置 */
+    private final Environment environment;
 
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "worker-id-lease-renew");
@@ -55,15 +65,24 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     private volatile String instanceId;
     /** 续期定时任务句柄 */
     private volatile ScheduledFuture<?> renewFuture;
+    /** 续期连续失败计数器 */
+    private final AtomicInteger renewFailCount = new AtomicInteger(0);
+    /**
+     * Worker ID 有效性标志。
+     * 续期连续失败达到阈值后置为 true，表示租约可能已被回收，
+     * 此时继续生成 ID 存在与其他实例冲突的风险。
+     */
+    private volatile boolean workerIdInvalid = false;
 
     public DbWorkerIdRepositoryImpl(SnowflakeProperties snowflakeProperties,
-                                     WorkerIdAllocMapper workerIdAllocMapper) {
+                                     WorkerIdAllocMapper workerIdAllocMapper,
+                                     Environment environment) {
         this.snowflakeProperties = snowflakeProperties;
         this.workerIdAllocMapper = workerIdAllocMapper;
+        this.environment = environment;
     }
 
     @Override
-    @Transactional
     public WorkerId registerWorkerId(String serviceName) throws WorkerIdUnavailableException {
         // 优先使用静态配置的 Worker ID
         if (snowflakeProperties.getWorkerId() >= 0) {
@@ -75,12 +94,13 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         // 构建实例标识
         instanceId = buildInstanceId();
 
-        // 尝试从数据库抢占
+        // 尝试从数据库抢占（SELECT FOR UPDATE SKIP LOCKED + UPDATE 在 Mapper 层保证原子性）
         try {
             WorkerId workerId = acquireFromDatabase();
             if (workerId != null) {
                 registeredWorkerId = workerId;
-                cacheWorkerId(workerId, snowflakeProperties.getDatacenterId(), workerId.value());
+                // DB 模式下无 ZK 序列号，传 -1 标识
+                cacheWorkerId(workerId, snowflakeProperties.getDatacenterId(), -1);
                 startLeaseRenewal();
                 log.info("从数据库抢占 WorkerId: {}, 实例: {}", workerId.value(), instanceId);
                 return workerId;
@@ -93,7 +113,9 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         Optional<WorkerId> cached = loadCachedWorkerId();
         if (cached.isPresent()) {
             registeredWorkerId = cached.get();
-            log.info("使用本地缓存的 WorkerId: {}", registeredWorkerId.value());
+            // DB 模式下使用本地缓存降级，该 ID 可能已被其他实例占用，存在 ID 冲突风险
+            log.warn("DB 模式下使用本地缓存降级恢复 Worker ID {}，该 ID 可能已被其他实例占用，存在 ID 冲突风险",
+                    registeredWorkerId.value());
             return registeredWorkerId;
         }
 
@@ -103,11 +125,13 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
 
     /**
      * 从数据库抢占一个空闲的 Worker ID。
-     * 在事务内执行 SELECT FOR UPDATE SKIP LOCKED + UPDATE。
+     * SELECT FOR UPDATE SKIP LOCKED 与 UPDATE 的防御性 WHERE 条件在 Mapper 层保证原子性，
+     * 无需在此处加事务（避免事务范围过大）。
      *
      * @return 抢占到的 WorkerId，无可用时返回 null
      */
-    private WorkerId acquireFromDatabase() {
+    @Transactional
+    public WorkerId acquireFromDatabase() {
         long leaseTimeoutMinutes = snowflakeProperties.getWorkerIdLeaseTimeout().toMinutes();
         Integer availableId = workerIdAllocMapper.selectAvailableWorkerId(leaseTimeoutMinutes);
         if (availableId == null) {
@@ -115,7 +139,7 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
             return null;
         }
 
-        int updated = workerIdAllocMapper.acquireWorkerId(availableId, instanceId);
+        int updated = workerIdAllocMapper.acquireWorkerId(availableId, instanceId, leaseTimeoutMinutes);
         if (updated > 0) {
             return new WorkerId(availableId);
         }
@@ -145,7 +169,11 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         }
     }
 
-    /** 执行一次租约续期 */
+    /**
+     * 执行一次租约续期。
+     * 连续失败达到 MAX_RENEW_FAIL_COUNT 后，将 workerIdInvalid 置为 true，
+     * 上层服务应通过 isWorkerIdValid() 检查后拒绝继续生成 ID，防止 ID 冲突。
+     */
     private void renewLease() {
         if (registeredWorkerId == null || instanceId == null) {
             return;
@@ -153,24 +181,45 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         try {
             int updated = workerIdAllocMapper.renewLease(registeredWorkerId.value(), instanceId);
             if (updated > 0) {
+                // 续期成功，重置失败计数器
+                renewFailCount.set(0);
                 log.debug("WorkerId {} 租约续期成功", registeredWorkerId.value());
             } else {
-                log.warn("WorkerId {} 租约续期失败，可能已被回收", registeredWorkerId.value());
+                int failCount = renewFailCount.incrementAndGet();
+                log.warn("WorkerId {} 租约续期失败（第 {} 次），可能已被回收", registeredWorkerId.value(), failCount);
+                if (failCount >= MAX_RENEW_FAIL_COUNT) {
+                    workerIdInvalid = true;
+                    log.error("WorkerId {} 续期连续失败 {} 次，已标记为无效，停止 ID 生成以防止冲突",
+                            registeredWorkerId.value(), failCount);
+                }
             }
         } catch (Exception e) {
-            log.error("WorkerId {} 租约续期异常", registeredWorkerId.value(), e);
+            int failCount = renewFailCount.incrementAndGet();
+            log.error("WorkerId {} 租约续期异常（第 {} 次）", registeredWorkerId.value(), failCount, e);
+            if (failCount >= MAX_RENEW_FAIL_COUNT) {
+                workerIdInvalid = true;
+                log.error("WorkerId {} 续期连续异常 {} 次，已标记为无效，停止 ID 生成以防止冲突",
+                        registeredWorkerId.value(), failCount);
+            }
         }
+    }
+
+    @Override
+    public boolean isWorkerIdValid() {
+        return !workerIdInvalid;
     }
 
     @Override
     @PreDestroy
     public void releaseWorkerId() {
         stopLeaseRenewal();
-        if (registeredWorkerId != null) {
+        if (registeredWorkerId != null && instanceId != null) {
             try {
-                int updated = workerIdAllocMapper.releaseWorkerId(registeredWorkerId.value());
+                int updated = workerIdAllocMapper.releaseWorkerId(registeredWorkerId.value(), instanceId);
                 if (updated > 0) {
                     log.info("释放 WorkerId: {}", registeredWorkerId.value());
+                } else {
+                    log.warn("释放 WorkerId {} 失败，可能已被其他实例占用", registeredWorkerId.value());
                 }
             } catch (Exception e) {
                 log.warn("释放 WorkerId 失败: {}", registeredWorkerId.value(), e);
@@ -275,14 +324,15 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
 
     /**
      * 构建实例标识，格式为 IP:port。
-     * 用于标识当前持有 Worker ID 的实例，续期时校验身份。
+     * 通过 Spring Environment 获取 server.port，比 System.getProperty 更可靠，
+     * 能正确读取 Spring Boot 配置文件中的端口设置。
      *
      * @return 实例标识字符串
      */
     private String buildInstanceId() {
         try {
             String ip = InetAddress.getLocalHost().getHostAddress();
-            String port = System.getProperty("server.port", "8011");
+            String port = environment.getProperty("server.port", "8011");
             return ip + ":" + port;
         } catch (Exception e) {
             log.warn("获取本机 IP 失败，使用 unknown 作为实例标识", e);

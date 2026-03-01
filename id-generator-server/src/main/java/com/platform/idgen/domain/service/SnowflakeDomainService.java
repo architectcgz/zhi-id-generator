@@ -170,6 +170,12 @@ public class SnowflakeDomainService {
                     "SnowflakeWorker not initialized");
         }
 
+        // DB 模式下，续期连续失败达到阈值后拒绝生成，防止与其他实例产生重复 ID
+        if (!workerIdRepository.isWorkerIdValid()) {
+            throw new IdGenerationException(IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
+                    "Worker ID 租约续期失败，当前 Worker ID 可能已被其他实例占用，拒绝生成 ID 以防止冲突");
+        }
+
         inFlightRequests.incrementAndGet();
         try {
             return idGenerationLatency.record(() -> {
