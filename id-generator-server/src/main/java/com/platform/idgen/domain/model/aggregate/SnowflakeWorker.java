@@ -155,8 +155,9 @@ public class SnowflakeWorker {
 
     /**
      * 运行时切换 Worker ID（用于时钟回拨场景）。
-     * 切换后重置 sequence，使用新 Worker ID 继续生成。
-     * 不重置 lastTimestamp，保持时间单调性，防止新 Worker ID 在旧时间段内生成重复 ID。
+     * 切换后重置 sequence 和 lastTimestamp，因为不同 Worker ID 的 ID 空间完全独立，
+     * 不存在时间重叠导致重复的风险。重置 lastTimestamp 后，切换后的首次生成不会
+     * 因旧 lastTimestamp 仍大于当前时间而再次触发 ClockBackwardsException。
      *
      * @param newWorkerId 新的 Worker ID
      */
@@ -164,9 +165,8 @@ public class SnowflakeWorker {
         WorkerId oldWorkerId = this.workerId;
         this.workerId = newWorkerId;
         this.sequence = 0;
-        // 不重置 lastTimestamp，保持时间单调性
-        log.info("Worker ID 切换：{} -> {}，当前 lastTimestamp={}",
-                oldWorkerId.value(), newWorkerId.value(), this.lastTimestamp);
+        this.lastTimestamp = -1; // 新 Worker ID 空间独立，重置时间戳避免切换后重试再次触发异常
+        log.info("Worker ID 切换：{} -> {}", oldWorkerId.value(), newWorkerId.value());
     }
 
     /**

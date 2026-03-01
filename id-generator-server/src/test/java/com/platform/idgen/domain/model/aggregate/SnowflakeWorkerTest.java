@@ -247,18 +247,19 @@ class SnowflakeWorkerTest {
     }
 
     @Test
-    @DisplayName("switchWorkerId 后 lastTimestamp 不重置，保持时间单调性")
-    void switchWorkerId后lastTimestamp不重置() {
+    @DisplayName("switchWorkerId 后 lastTimestamp 重置为 -1，新 Worker ID 空间独立不会再次触发回拨异常")
+    void switchWorkerId后lastTimestamp重置为负一() {
         // 先生成一个 ID 建立 lastTimestamp
         worker.generateId();
-        long lastTsBefore = worker.getLastTimestamp();
+        assertThat(worker.getLastTimestamp()).isGreaterThan(-1L);
 
         worker.switchWorkerId(new WorkerId(10));
 
-        // lastTimestamp 不应被重置为 -1
+        // 不同 Worker ID 空间独立，lastTimestamp 应重置为 -1，
+        // 避免切换后重试时旧 lastTimestamp 仍大于当前时间而再次触发 ClockBackwardsException
         assertThat(worker.getLastTimestamp())
-                .as("switchWorkerId 后 lastTimestamp 应保持不变")
-                .isEqualTo(lastTsBefore);
+                .as("switchWorkerId 后 lastTimestamp 应重置为 -1")
+                .isEqualTo(-1L);
     }
 
     // ================================================================

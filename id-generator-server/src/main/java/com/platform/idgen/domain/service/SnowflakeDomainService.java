@@ -217,12 +217,19 @@ public class SnowflakeDomainService {
                         workerIdSwitchCount.increment();
                         log.info("时钟回拨触发 Worker ID 切换，新 WorkerId={}，回拨偏移={}ms",
                                 backupId.get().value(), e.getOffset());
-                        // 切换后重新生成 ID
-                        SnowflakeWorker.GenerateResult retryResult = worker.generateId();
-                        if (retryResult.isSequenceOverflow()) {
-                            sequenceOverflowCount.increment();
+                        // 切换后重新生成 ID，捕获重试失败（如切换后仍有异常）
+                        try {
+                            SnowflakeWorker.GenerateResult retryResult = worker.generateId();
+                            if (retryResult.isSequenceOverflow()) {
+                                sequenceOverflowCount.increment();
+                            }
+                            return retryResult.getId();
+                        } catch (Exception retryEx) {
+                            log.error("切换 Worker ID 后重试生成 ID 仍失败，WorkerId={}",
+                                    backupId.get().value(), retryEx);
+                            throw new IdGenerationException(IdGenerationException.ErrorCode.CLOCK_BACKWARDS,
+                                    "切换 Worker ID 后重试失败: " + retryEx.getMessage());
                         }
-                        return retryResult.getId();
                     }
 
                     // 无备用 ID，降级为拒绝策略
