@@ -18,6 +18,7 @@ import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Iterator;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Queue;
@@ -249,17 +250,21 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
             }
         }
 
-        // 续期所有备用 Worker ID（失败仅记录警告，不影响主用 ID 有效性）
-        for (WorkerId backupId : backupWorkerIds) {
+        // 续期所有备用 Worker ID，续期失败时从队列移除，避免后续切换到已失效的备用 ID
+        Iterator<WorkerId> iterator = backupWorkerIds.iterator();
+        while (iterator.hasNext()) {
+            WorkerId backupId = iterator.next();
             try {
                 int updated = workerIdAllocMapper.renewLease(backupId.value(), instanceId);
                 if (updated > 0) {
                     log.debug("备用 WorkerId {} 租约续期成功", backupId.value());
                 } else {
-                    log.warn("备用 WorkerId {} 租约续期失败，可能已被回收", backupId.value());
+                    log.warn("备用 WorkerId {} 租约续期失败，已从备用队列移除", backupId.value());
+                    iterator.remove();
                 }
             } catch (Exception e) {
-                log.warn("备用 WorkerId {} 租约续期异常", backupId.value(), e);
+                log.warn("备用 WorkerId {} 租约续期异常，已从备用队列移除", backupId.value(), e);
+                iterator.remove();
             }
         }
     }
