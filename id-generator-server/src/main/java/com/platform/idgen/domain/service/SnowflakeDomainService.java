@@ -178,7 +178,7 @@ public class SnowflakeDomainService {
 
         // DB 模式下，续期连续失败达到阈值后拒绝生成，防止与其他实例产生重复 ID
         if (!workerIdRepository.isWorkerIdValid()) {
-            throw new IdGenerationException(IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
+            throw new IdGenerationException(IdGenerationException.ErrorCode.WORKER_ID_INVALID,
                     "Worker ID 租约续期失败，当前 Worker ID 可能已被其他实例占用，拒绝生成 ID 以防止冲突");
         }
 
