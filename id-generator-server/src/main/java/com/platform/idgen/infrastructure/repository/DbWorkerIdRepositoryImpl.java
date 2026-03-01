@@ -323,6 +323,23 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     public Optional<WorkerId> consumeBackupWorkerId() {
         WorkerId backupId = backupWorkerIds.poll();
         if (backupId != null) {
+            // 将备用 ID 提升为主用，并释放旧的主用 ID，
+            // 确保 renewLease 续期的是当前实际使用的 Worker ID
+            WorkerId oldPrimary = this.registeredWorkerId;
+            this.registeredWorkerId = backupId;
+            // 重置续期失败计数，新主用 ID 从零开始计数
+            renewFailCount.set(0);
+            workerIdInvalid = false;
+            log.info("备用 WorkerId {} 提升为主用，原主用 WorkerId {} 将被释放",
+                    backupId.value(), oldPrimary != null ? oldPrimary.value() : "null");
+            // 主动释放旧的主用 ID，归还给数据库供其他实例使用
+            if (oldPrimary != null && instanceId != null) {
+                try {
+                    workerIdAllocMapper.releaseWorkerId(oldPrimary.value(), instanceId);
+                } catch (Exception e) {
+                    log.warn("释放旧主用 WorkerId {} 失败", oldPrimary.value(), e);
+                }
+            }
             log.info("消费备用 WorkerId: {}，剩余备用数量: {}", backupId.value(), backupWorkerIds.size());
         } else {
             log.warn("备用 Worker ID 已耗尽，无法切换");
