@@ -7,7 +7,9 @@ import com.platform.idgen.infrastructure.config.SnowflakeProperties;
 import com.platform.idgen.infrastructure.persistence.mapper.WorkerIdAllocMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -56,6 +58,13 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     /** Spring Environment，用于可靠获取 server.port 配置 */
     private final Environment environment;
 
+    /**
+     * 注入 ApplicationContext，用于通过代理对象调用 @Transactional 方法，
+     * 避免 Spring AOP 自调用（this.xxx()）导致事务注解不生效。
+     */
+    @Autowired
+    private ApplicationContext applicationContext;
+
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "worker-id-lease-renew");
         thread.setDaemon(true);
@@ -100,8 +109,9 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         instanceId = buildInstanceId();
 
         // 尝试从数据库抢占（SELECT FOR UPDATE SKIP LOCKED + UPDATE 在 Mapper 层保证原子性）
+        // 通过 self() 获取代理对象调用，确保 @Transactional 注解生效（避免 Spring AOP 自调用失效）
         try {
-            WorkerId workerId = acquireFromDatabase();
+            WorkerId workerId = self().acquireFromDatabase();
             if (workerId != null) {
                 registeredWorkerId = workerId;
                 // DB 模式下无 ZK 序列号，传 -1 标识
@@ -173,7 +183,8 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         int acquired = 0;
         for (int i = 0; i < backupCount; i++) {
             try {
-                WorkerId backupId = acquireFromDatabase();
+                // 通过 self() 获取代理对象调用，确保 @Transactional 注解生效
+                WorkerId backupId = self().acquireFromDatabase();
                 if (backupId != null) {
                     backupWorkerIds.offer(backupId);
                     acquired++;
@@ -411,6 +422,16 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
         } catch (Exception e) {
             log.warn("保存最后使用的时间戳失败", e);
         }
+    }
+
+    /**
+     * 获取当前 Bean 的 Spring 代理对象，用于调用 @Transactional 方法。
+     * 直接使用 this.acquireFromDatabase() 会绕过 Spring AOP 代理，导致事务注解不生效。
+     *
+     * @return 当前 Bean 的代理实例
+     */
+    private DbWorkerIdRepositoryImpl self() {
+        return applicationContext.getBean(DbWorkerIdRepositoryImpl.class);
     }
 
     /**
