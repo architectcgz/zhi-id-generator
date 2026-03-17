@@ -1,0 +1,86 @@
+name: id-generator-docker
+
+services:
+  id-generator-db-init:
+    image: postgres:16-alpine
+    container_name: id-generator-db-init
+    environment:
+      - DB_HOST=${DB_HOST:-shared-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-id_generator}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123456}
+    entrypoint: ["/bin/sh", "/scripts/init-id-generator-db.sh"]
+    volumes:
+      - ./init-id-generator-db.sh:/scripts/init-id-generator-db.sh:ro
+      - ./schema/schema.sql:/schema/schema.sql:ro
+    networks:
+      - shared-infra
+    restart: "no"
+
+  id-generator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: id-generator-server:latest
+    environment:
+      - JAVA_OPTS=${JAVA_OPTS:--Xms512m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=50}
+      - DB_HOST=${DB_HOST:-shared-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-id_generator}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123456}
+      - DATACENTER_ID=${DATACENTER_ID:-0}
+      - WORKER_ID=-1
+      - SNOWFLAKE_EPOCH=${SNOWFLAKE_EPOCH:-1735689600000}
+      - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-docker}
+      - WORKER_ID_CACHE_PATH=/data/leaf/workerID.properties
+    ports:
+      - "8012-8021:8011"
+    volumes:
+      - /data/leaf
+      - /app/logs
+    networks:
+      - shared-infra
+    depends_on:
+      id-generator-db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8011/api/v1/id/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+          cpus: "0.25"
+
+  id-generator-nginx:
+    image: nginx:1.27-alpine
+    container_name: id-generator-nginx
+    depends_on:
+      id-generator:
+        condition: service_healthy
+    ports:
+      - "8011:8011"
+    volumes:
+      - ./nginx/id-generator-lb.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - shared-infra
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8011/api/v1/id/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+networks:
+  shared-infra:
+    external: true

@@ -2,6 +2,22 @@
 
 这是最灵活的部署方式，允许你随时增加或减少 ID Generator 实例数量。
 
+当前编排复用和 `file-service` 相同的共享基础设施：
+
+- PostgreSQL: `shared-postgres:5432`
+- Redis: `shared-redis:6379`（当前服务未使用，但共享网络保持一致）
+- Docker Network: `shared-infra`
+
+当前 `docker-compose.scale.yml` 已内置一个简单的 Nginx 负载均衡入口：
+
+- 统一入口: `http://localhost:8011`
+- 实例直连调试端口: 从 `8012` 开始顺延
+
+当前 `docker/nginx/id-generator-lb.conf` 为固定双实例配置，默认转发到
+`deploy-id-generator-1:8011` 和 `deploy-id-generator-2:8011`。
+如果把 `id-generator` 扩到 3 个及以上实例，需要同步修改 Nginx upstream；
+否则请直接使用实例直连端口或应用层负载均衡。
+
 ## 快速开始
 
 ### 使用脚本（推荐）
@@ -35,14 +51,17 @@
 ### 使用 Docker Compose 命令
 
 ```bash
-# 启动 3 个实例
-docker compose -f docker-compose.scale.yml up -d --scale id-generator=3
+# 先启动共享基础设施
+cd /home/azhi/workspace/projects/infra
+docker compose up -d
 
-# 扩容到 5 个实例
-docker compose -f docker-compose.scale.yml up -d --scale id-generator=5 --no-recreate
+# 启动 2 个实例（8011 为 Nginx 入口，实例直连端口从 8012 开始）
+cd /home/azhi/workspace/projects/id-generator/deploy
+docker compose -f docker-compose.scale.yml up -d --scale id-generator=2
 
-# 缩容到 2 个实例
-docker compose -f docker-compose.scale.yml up -d --scale id-generator=2 --no-recreate
+# 如果需要扩到 3 个及以上实例，先修改 docker/nginx/id-generator-lb.conf
+# 再执行 scale；否则 Nginx 不会自动把新增实例纳入转发
+docker compose -f docker-compose.scale.yml up -d --scale id-generator=3 --no-recreate
 
 # 查看状态
 docker compose -f docker-compose.scale.yml ps
@@ -57,32 +76,41 @@ docker compose -f docker-compose.scale.yml down
 
 ```
 ┌─────────────────────────────────────┐
-│      ZooKeeper (单实例)              │
-│   自动分配 Worker ID: 0, 1, 2...    │
+│    PostgreSQL worker_id_alloc       │
+│  自动抢占 Worker ID: 0, 1, 2...     │
 └─────────────────────────────────────┘
+                 │
+           ┌─────▼─────┐
+           │ Nginx:8011│
+           └─────┬─────┘
                  │
     ┌────────────┼────────────┐
     │            │            │
 ┌───▼───┐   ┌───▼───┐   ┌───▼───┐
-│ ID-1  │   │ ID-2  │   │ ID-3  │  ... 可扩展到 1024 个
+│ ID-1  │   │ ID-2  │   │ ID-3  │  ... 最多 32 个活跃实例
 │ WID:0 │   │ WID:1 │   │ WID:2 │
-│:8011  │   │:8012  │   │:8013  │
+│:8012  │   │:8013  │   │:8014  │
 └───────┘   └───────┘   └───────┘
 ```
 
 ### 关键特性
 
-1. **动态端口映射**: 使用端口范围 `8011-8020:8011`
-   - 第 1 个实例: `localhost:8011`
-   - 第 2 个实例: `localhost:8012`
-   - 第 3 个实例: `localhost:8013`
+1. **Nginx 统一入口**: `localhost:8011`
+   - 业务侧优先访问 `http://localhost:8011`
+   - 当前 upstream 为固定双实例 round-robin，目标是稳定支撑双实例部署
+   - 如果实例数发生变化，需要同步更新 `docker/nginx/id-generator-lb.conf`
+
+2. **实例直连端口映射**: 使用端口范围 `8012-8021:8011`
+   - 第 1 个实例: `localhost:8012`
+   - 第 2 个实例: `localhost:8013`
+   - 第 3 个实例: `localhost:8014`
    - 以此类推...
 
-2. **自动 Worker ID 分配**: ZooKeeper 自动为每个实例分配唯一 ID
+3. **自动 Worker ID 分配**: PostgreSQL 租约表自动为每个实例分配唯一 ID
 
-3. **独立数据卷**: 每个实例使用匿名卷，互不干扰
+4. **独立数据卷**: 每个实例使用匿名卷，互不干扰
 
-4. **零停机扩缩容**: 使用 `--no-recreate` 标志，不影响现有实例
+5. **零停机扩缩容**: 使用 `--no-recreate` 标志，不影响现有实例
 
 ## 使用场景
 
@@ -125,40 +153,29 @@ docker compose -f docker-compose.scale.yml down
 
 | 实例编号 | 容器名称 | 宿主机端口 | 容器端口 |
 |---------|---------|-----------|---------|
-| 1 | id-generator-deploy-id-generator-1 | 8011 | 8011 |
-| 2 | id-generator-deploy-id-generator-2 | 8012 | 8011 |
-| 3 | id-generator-deploy-id-generator-3 | 8013 | 8011 |
+| LB | id-generator-nginx | 8011 | 8011 |
+| 1 | id-generator-deploy-id-generator-1 | 8012 | 8011 |
+| 2 | id-generator-deploy-id-generator-2 | 8013 | 8011 |
+| 3 | id-generator-deploy-id-generator-3 | 8014 | 8011 |
 | ... | ... | ... | ... |
-| N | id-generator-deploy-id-generator-N | 8010+N | 8011 |
+| N | id-generator-deploy-id-generator-N | 8011+N | 8011 |
+
+说明：实例直连端口从 `8012-8021` 范围内动态分配，重建后不保证一定连续。实际映射请以 `docker compose -f docker-compose.scale.yml ps` 为准。
 
 ## 负载均衡
 
-### 使用 Nginx
+### 使用内置 Nginx
 
-创建 `nginx.conf`:
+`docker-compose.scale.yml` 已经内置 Nginx，默认监听 `8011`，配置文件位于：
 
-```nginx
-upstream id_generator_cluster {
-    least_conn;  # 最少连接数负载均衡
-    
-    server localhost:8011 max_fails=3 fail_timeout=30s;
-    server localhost:8012 max_fails=3 fail_timeout=30s;
-    server localhost:8013 max_fails=3 fail_timeout=30s;
-    # 根据实例数量添加更多...
-}
+`docker/nginx/id-generator-lb.conf`
 
-server {
-    listen 8010;
-    
-    location / {
-        proxy_pass http://id_generator_cluster;
-        proxy_next_upstream error timeout http_500 http_502 http_503;
-        proxy_connect_timeout 5s;
-        proxy_send_timeout 10s;
-        proxy_read_timeout 10s;
-    }
-}
-```
+常用访问方式：
+
+- 统一入口: `http://localhost:8011/api/v1/id/snowflake`
+- 实例直连示例: `http://localhost:8012/api/v1/id/snowflake`
+- 具体端口请先执行 `docker compose -f docker-compose.scale.yml ps`
+- 默认只纳入两个后端实例；如果扩到 3 个及以上实例，需手工补充 upstream
 
 ### 使用应用层负载均衡
 
@@ -166,9 +183,9 @@ server {
 
 ```java
 List<String> endpoints = Arrays.asList(
-    "http://localhost:8011",
     "http://localhost:8012",
-    "http://localhost:8013"
+    "http://localhost:8013",
+    "http://localhost:8014"
 );
 
 // 轮询
@@ -189,8 +206,8 @@ String endpoint = endpoints.get(index);
 Current Service Status:
 
 NAME                                    IMAGE                       STATUS
-id-generator-postgres                   postgres:16-alpine          Up (healthy)
-id-generator-zookeeper                  zookeeper:3.8               Up (healthy)
+id-generator-db-init                    postgres:16-alpine          Exited (0)
+id-generator-nginx                      nginx:1.27-alpine           Up (healthy)
 id-generator-deploy-id-generator-1      id-generator-server:latest  Up (healthy)
 id-generator-deploy-id-generator-2      id-generator-server:latest  Up (healthy)
 id-generator-deploy-id-generator-3      id-generator-server:latest  Up (healthy)
@@ -199,17 +216,17 @@ ID Generator Instances:
   Running: 3 instance(s)
 
   • id-generator-deploy-id-generator-1
-    Port: 8011
+    Port: 8012
     Worker ID: 0
     Status: UP
 
   • id-generator-deploy-id-generator-2
-    Port: 8012
+    Port: 8013
     Worker ID: 1
     Status: UP
 
   • id-generator-deploy-id-generator-3
-    Port: 8013
+    Port: 8014
     Worker ID: 2
     Status: UP
 ```
@@ -224,13 +241,13 @@ ID Generator Instances:
 ```
 Testing all ID Generator instances...
 
-✓ id-generator-deploy-id-generator-1 (Port: 8011, Worker ID: 0)
+✓ id-generator-deploy-id-generator-1 (Port: 8012, Worker ID: 0)
   Generated ID: 139370018650464256
 
-✓ id-generator-deploy-id-generator-2 (Port: 8012, Worker ID: 1)
+✓ id-generator-deploy-id-generator-2 (Port: 8013, Worker ID: 1)
   Generated ID: 139370018650464257
 
-✓ id-generator-deploy-id-generator-3 (Port: 8013, Worker ID: 2)
+✓ id-generator-deploy-id-generator-3 (Port: 8014, Worker ID: 2)
   Generated ID: 139370018650464258
 
 Test Summary:
@@ -256,7 +273,7 @@ deploy:
   resources:
     limits:
       memory: 768M
-      cpus: '1.0'
+      cpus: '2.0'
     reservations:
       memory: 256M
       cpus: '0.25'
@@ -294,11 +311,11 @@ docker compose -f docker-compose.scale.yml down -v
 
 ### 端口不足
 
-默认端口范围是 `8011-8020`（10个端口）。如需更多实例，修改 `docker-compose.scale.yml`:
+默认端口范围是 `8012-8021`（10个实例直连端口），`8011` 预留给 Nginx。如需更多实例，修改 `docker-compose.scale.yml`:
 
 ```yaml
 ports:
-  - "8011-8050:8011"  # 支持 40 个实例
+  - "8012-8051:8011"  # 支持 40 个实例直连端口
 ```
 
 ## 最佳实践
@@ -308,12 +325,12 @@ ports:
 3. **压测环境**: 根据需要动态调整
 4. **监控**: 使用 Prometheus + Grafana 监控所有实例
 5. **日志**: 集中收集日志到 ELK 或类似系统
-6. **备份**: 定期备份 PostgreSQL 和 ZooKeeper 数据
+6. **备份**: 定期备份 PostgreSQL 数据
 
 ## 限制
 
 - **最大实例数**: 受端口范围限制（默认 10 个，可调整）
-- **Worker ID 上限**: 1024 个（Snowflake 算法限制）
+- **Worker ID 上限**: 32 个活跃实例（当前实现使用 5 bit worker id）
 - **网络性能**: 所有实例共享宿主机网络带宽
 
 ## 与其他部署方式对比

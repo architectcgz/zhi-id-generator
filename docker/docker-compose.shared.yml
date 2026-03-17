@@ -1,0 +1,75 @@
+name: id-generator-docker
+
+services:
+  id-generator-db-init:
+    image: postgres:16-alpine
+    container_name: id-generator-db-init
+    environment:
+      - DB_HOST=${DB_HOST:-shared-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-id_generator}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123456}
+    entrypoint: ["/bin/sh", "/scripts/init-id-generator-db.sh"]
+    volumes:
+      - ./init-id-generator-db.sh:/scripts/init-id-generator-db.sh:ro
+      - ./schema/schema.sql:/schema/schema.sql:ro
+    networks:
+      - shared-infra
+    restart: "no"
+
+  id-generator-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: id-generator-server:latest
+    container_name: id-generator-server
+    environment:
+      - JAVA_OPTS=${JAVA_OPTS:--Xms256m -Xmx512m -XX:+UseG1GC}
+      - DB_HOST=${DB_HOST:-shared-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-id_generator}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123456}
+      - DATACENTER_ID=${DATACENTER_ID:-0}
+      - WORKER_ID=${WORKER_ID:--1}
+      - SNOWFLAKE_EPOCH=${SNOWFLAKE_EPOCH:-1735689600000}
+      - CLOCK_BACKWARDS_MAX_WAIT=${CLOCK_BACKWARDS_MAX_WAIT:-5}
+      - CLOCK_BACKWARDS_ALERT_THRESHOLD=${CLOCK_BACKWARDS_ALERT_THRESHOLD:-10}
+      - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-docker}
+      - WORKER_ID_CACHE_PATH=/data/leaf/workerID.properties
+    ports:
+      - "${SERVER_PORT:-8011}:8011"
+    volumes:
+      - id_generator_data:/data
+      - id_generator_logs:/app/logs
+    networks:
+      - shared-infra
+    depends_on:
+      id-generator-db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8011/api/v1/id/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+          cpus: "0.25"
+
+networks:
+  shared-infra:
+    external: true
+
+volumes:
+  id_generator_data:
+    name: id_generator_data
+  id_generator_logs:
+    name: id_generator_logs

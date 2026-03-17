@@ -4,9 +4,8 @@ REM Start Full ID Generator Environment (including server)
 cd /d "%~dp0.."
 
 echo Starting full ID Generator environment...
-echo - PostgreSQL (port 5434)
-echo - ZooKeeper (port 2181)
-echo - ID Generator Server (port 8010)
+echo - PostgreSQL (port 5435)
+echo - ID Generator Server (port 8011)
 echo.
 
 REM Check if .env exists, if not copy from example
@@ -27,18 +26,17 @@ echo.
 echo Full environment started successfully!
 echo.
 echo Services:
-echo   PostgreSQL: localhost:5434
-echo   ZooKeeper: localhost:2181
-echo   ID Generator API: http://localhost:8010
+echo   PostgreSQL: localhost:5435
+echo   ID Generator API: http://localhost:8011
 echo.
 echo Health check:
-echo   curl http://localhost:8010/actuator/health
+echo   curl http://localhost:8011/actuator/health
 echo.
 echo Generate Snowflake ID:
-echo   curl http://localhost:8010/api/v1/id/snowflake
+echo   curl http://localhost:8011/api/v1/id/snowflake
 echo.
 echo Generate Segment ID:
-echo   curl http://localhost:8010/api/v1/id/segment/default
+echo   curl http://localhost:8011/api/v1/id/segment/default
 echo.
 echo To view logs:
 echo   docker-compose logs -f id-generator-server

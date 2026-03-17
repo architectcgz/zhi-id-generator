@@ -121,9 +121,9 @@ Invoke-RestMethod http://localhost:8011/api/v1/id/health
 Invoke-RestMethod http://localhost:8011/api/v1/id/snowflake
 
 # 查看 Worker ID
-(Invoke-RestMethod http://localhost:8011/api/v1/id/health).snowflake.workerId
-(Invoke-RestMethod http://localhost:8012/api/v1/id/health).snowflake.workerId
-(Invoke-RestMethod http://localhost:8013/api/v1/id/health).snowflake.workerId
+(Invoke-RestMethod http://localhost:8011/api/v1/id/health).data.snowflake.workerId
+(Invoke-RestMethod http://localhost:8012/api/v1/id/health).data.snowflake.workerId
+(Invoke-RestMethod http://localhost:8013/api/v1/id/health).data.snowflake.workerId
 ```
 
 ## 高级命令
@@ -145,11 +145,8 @@ docker port deploy-id-generator-2
 # 进入实例 1
 docker exec -it deploy-id-generator-1 sh
 
-# 进入 ZooKeeper
-docker exec -it id-generator-zookeeper sh
-
-# 进入 PostgreSQL
-docker exec -it id-generator-postgres sh
+# 进入共享 PostgreSQL
+docker exec -it shared-postgres psql -U postgres -d id_generator
 ```
 
 ### 查看资源使用
@@ -162,26 +159,14 @@ docker stats
 docker stats $(docker ps --filter "name=id-generator" -q)
 ```
 
-### ZooKeeper 管理
-
-```bash
-# 连接到 ZooKeeper CLI
-docker exec -it id-generator-zookeeper zkCli.sh
-
-# 在 ZooKeeper CLI 中执行：
-# 查看已注册的 Worker
-ls /leaf/id-generator/snowflake
-
-# 查看特定 Worker 信息
-get /leaf/id-generator/snowflake/worker-0000000000
-get /leaf/id-generator/snowflake/worker-0000000001
-```
-
 ## 常见操作流程
 
 ### 首次部署
 
 ```bash
+cd /home/azhi/workspace/projects/infra
+docker compose up -d
+
 cd id-generator/deploy
 docker compose -f docker-compose.scale.yml up -d --scale id-generator=3
 docker compose -f docker-compose.scale.yml ps
@@ -302,6 +287,6 @@ done
 
 1. **端口范围**: 默认支持 8011-8020（10个实例），如需更多请修改配置
 2. **--no-recreate**: 扩缩容时使用此标志避免重启现有实例
-3. **Worker ID**: ZooKeeper 自动分配，无需手动配置
+3. **Worker ID**: 由 PostgreSQL 租约表自动分配，无需手动配置
 4. **数据持久化**: 使用命名卷，停止服务不会丢失数据
 5. **清理数据**: 使用 `down -v` 会删除所有数据，谨慎使用

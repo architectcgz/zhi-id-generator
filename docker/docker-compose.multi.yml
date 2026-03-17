@@ -6,24 +6,20 @@ services:
   id-generator-server-2:
     build:
       context: ..
-      dockerfile: id-generator-server/Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: id-generator-server-2
     environment:
-      DB_HOST: postgres
+      DB_HOST: id-generator-postgres
       DB_PORT: 5432
       DB_USER: id_gen_user
       DB_PASSWORD: id_gen_password
-      ZOOKEEPER_CONNECTION_STRING: zookeeper:2181
       DATACENTER_ID: 0
       WORKER_ID: -1
-      ENABLE_ZOOKEEPER: true
       SPRING_PROFILES_ACTIVE: docker
     ports:
-      - "8011:8010"
+      - "8012:8011"
     depends_on:
-      postgres:
-        condition: service_healthy
-      zookeeper:
+      id-generator-postgres:
         condition: service_healthy
     networks:
       - id-generator-network
@@ -33,24 +29,20 @@ services:
   id-generator-server-3:
     build:
       context: ..
-      dockerfile: id-generator-server/Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: id-generator-server-3
     environment:
-      DB_HOST: postgres
+      DB_HOST: id-generator-postgres
       DB_PORT: 5432
       DB_USER: id_gen_user
       DB_PASSWORD: id_gen_password
-      ZOOKEEPER_CONNECTION_STRING: zookeeper:2181
       DATACENTER_ID: 0
       WORKER_ID: -1
-      ENABLE_ZOOKEEPER: true
       SPRING_PROFILES_ACTIVE: docker
     ports:
-      - "8012:8010"
+      - "8013:8011"
     depends_on:
-      postgres:
-        condition: service_healthy
-      zookeeper:
+      id-generator-postgres:
         condition: service_healthy
     networks:
       - id-generator-network

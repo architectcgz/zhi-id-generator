@@ -83,8 +83,8 @@ function Show-Status {
                 # Try to get worker ID
                 try {
                     $health = Invoke-RestMethod -Uri "http://localhost:$port/api/v1/id/health" -ErrorAction SilentlyContinue
-                    Write-Host "    Worker ID: $($health.snowflake.workerId)" -ForegroundColor Gray
-                    Write-Host "    Status: $($health.status)" -ForegroundColor Green
+                    Write-Host "    Worker ID: $($health.data.snowflake.workerId)" -ForegroundColor Gray
+                    Write-Host "    Status: $($health.data.status)" -ForegroundColor Green
                 } catch {
                     Write-Host "    Status: Starting..." -ForegroundColor Yellow
                 }
@@ -152,13 +152,13 @@ function Test-Instances {
                 $results += [PSCustomObject]@{
                     Container = $container
                     Port = $port
-                    WorkerId = $health.snowflake.workerId
-                    Status = $health.status
+                    WorkerId = $health.data.snowflake.workerId
+                    Status = $health.data.status
                     GeneratedId = $idResult.data
                     Success = $true
                 }
-                
-                Write-Host "✓ $container (Port: $port, Worker ID: $($health.snowflake.workerId))" -ForegroundColor Green
+
+                Write-Host "✓ $container (Port: $port, Worker ID: $($health.data.snowflake.workerId))" -ForegroundColor Green
                 Write-Host "  Generated ID: $($idResult.data)" -ForegroundColor Gray
                 
             } catch {

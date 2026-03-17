@@ -7,9 +7,9 @@ Write-Host ""
 Write-Host "1. Health Check:" -ForegroundColor Yellow
 try {
     $health = Invoke-RestMethod -Uri "http://localhost:8011/api/v1/id/health"
-    Write-Host "   Status: $($health.status)" -ForegroundColor Green
-    Write-Host "   Snowflake WorkerId: $($health.snowflake.workerId)" -ForegroundColor Green
-    Write-Host "   Segment BizTags: $($health.segment.bizTagCount)" -ForegroundColor Green
+    Write-Host "   Status: $($health.data.status)" -ForegroundColor Green
+    Write-Host "   Snowflake WorkerId: $($health.data.snowflake.workerId)" -ForegroundColor Green
+    Write-Host "   Segment BizTags: $($health.data.segment.bizTagCount)" -ForegroundColor Green
 } catch {
     Write-Host "   Failed: $_" -ForegroundColor Red
 }
@@ -49,10 +49,11 @@ Write-Host ""
 # Test Worker Info
 Write-Host "5. Get Worker Info:" -ForegroundColor Yellow
 try {
-    $result = Invoke-RestMethod -Uri "http://localhost:8011/api/v1/id/worker/info"
+    $result = Invoke-RestMethod -Uri "http://localhost:8011/api/v1/id/snowflake/info"
     Write-Host "   Worker ID: $($result.data.workerId)" -ForegroundColor Green
     Write-Host "   Datacenter ID: $($result.data.datacenterId)" -ForegroundColor Green
-    Write-Host "   Service Name: $($result.data.serviceName)" -ForegroundColor Green
+    Write-Host "   Initialized: $($result.data.initialized)" -ForegroundColor Green
+    Write-Host "   Epoch: $($result.data.epoch)" -ForegroundColor Green
 } catch {
     Write-Host "   Failed: $_" -ForegroundColor Red
 }

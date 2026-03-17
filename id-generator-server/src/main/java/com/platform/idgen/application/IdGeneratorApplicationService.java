@@ -1,7 +1,13 @@
 package com.platform.idgen.application;
 
+import com.platform.idgen.application.dto.HealthStatus;
+import com.platform.idgen.application.dto.SegmentCacheInfo;
+import com.platform.idgen.application.dto.SegmentCacheInfo.SegmentState;
+import com.platform.idgen.application.dto.SnowflakeInfo;
+import com.platform.idgen.application.dto.SnowflakeParseInfo;
 import com.platform.idgen.domain.model.valueobject.BizTag;
 import com.platform.idgen.domain.model.valueobject.SnowflakeId;
+import com.platform.idgen.domain.service.SegmentDomainService.SegmentStateSnapshot;
 import com.platform.idgen.domain.service.SegmentDomainService;
 import com.platform.idgen.domain.service.SnowflakeDomainService;
 import org.slf4j.Logger;
@@ -9,9 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * ID Generation Application Service
@@ -105,14 +109,49 @@ public class IdGeneratorApplicationService {
      * @param bizTag business tag identifier
      * @return map containing cache information
      */
-    public Map<String, Object> getSegmentCacheInfo(String bizTag) {
+    public SegmentCacheInfo getSegmentCacheInfo(String bizTag) {
         log.debug("Getting cache info for bizTag: {}", bizTag);
-        
-        Map<String, Object> info = new HashMap<>();
-        info.put("bizTag", bizTag);
-        info.put("initialized", segmentService.isInitialized());
-        
-        return info;
+
+        if (bizTag == null || bizTag.isBlank()) {
+            throw new IllegalArgumentException("BizTag cannot be null or empty");
+        }
+
+        return segmentService.getCacheSnapshot(new BizTag(bizTag))
+                .map(snapshot -> new SegmentCacheInfo(
+                        snapshot.bizTag(),
+                        segmentService.isInitialized(),
+                        true,
+                        snapshot.initialized(),
+                        snapshot.currentPos(),
+                        snapshot.nextReady(),
+                        snapshot.loadingNextSegment(),
+                        snapshot.minStep(),
+                        snapshot.updateTimestamp(),
+                        toSegmentState(snapshot.currentSegment()),
+                        toSegmentState(snapshot.nextSegment())
+                ))
+                .orElseGet(() -> new SegmentCacheInfo(
+                        bizTag,
+                        segmentService.isInitialized(),
+                        false,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null
+                ));
+    }
+
+    private SegmentState toSegmentState(SegmentStateSnapshot snapshot) {
+        return new SegmentState(
+                snapshot.value(),
+                snapshot.max(),
+                snapshot.step(),
+                snapshot.idle()
+        );
     }
     
     // ========== Snowflake Mode Methods ==========
@@ -124,13 +163,8 @@ public class IdGeneratorApplicationService {
      * @throws IllegalStateException if service not initialized
      */
     public long generateSnowflakeId() {
-        log.debug("Generating snowflake ID");
-        
         SnowflakeId id = snowflakeService.generateId();
-        long value = id.value();
-        
-        log.debug("Generated snowflake ID: {}", value);
-        return value;
+        return id.value();
     }
     
     /**
@@ -165,22 +199,20 @@ public class IdGeneratorApplicationService {
      * @param id the Snowflake ID to parse
      * @return map containing parsed components (timestamp, datacenterId, workerId, sequence)
      */
-    public Map<String, Object> parseSnowflakeId(long id) {
+    public SnowflakeParseInfo parseSnowflakeId(long id) {
         log.debug("Parsing snowflake ID: {}", id);
         
         SnowflakeId snowflakeId = snowflakeService.parseId(id);
-        
-        Map<String, Object> info = new HashMap<>();
-        info.put("id", id);
-        
-        // Get epoch from service to correctly parse timestamp
         long epoch = snowflakeService.getEpoch().orElse(0L);
-        info.put("timestamp", snowflakeId.getTimestamp(epoch));
-        info.put("datacenterId", snowflakeId.getDatacenterId());
-        info.put("workerId", snowflakeId.getWorkerId());
-        info.put("sequence", snowflakeId.getSequence());
-        info.put("epoch", epoch);
-        
+        SnowflakeParseInfo info = new SnowflakeParseInfo(
+                id,
+                snowflakeId.getTimestamp(epoch),
+                snowflakeId.getDatacenterId(),
+                snowflakeId.getWorkerId(),
+                snowflakeId.getSequence(),
+                epoch
+        );
+
         log.debug("Parsed snowflake ID: {}", info);
         return info;
     }
@@ -190,25 +222,15 @@ public class IdGeneratorApplicationService {
      * 
      * @return map containing worker info (workerId, datacenterId, initialized)
      */
-    public Map<String, Object> getSnowflakeInfo() {
+    public SnowflakeInfo getSnowflakeInfo() {
         log.debug("Getting snowflake info");
-        
-        Map<String, Object> info = new HashMap<>();
-        info.put("initialized", snowflakeService.isInitialized());
-        
-        snowflakeService.getWorkerId().ifPresent(workerId -> 
-            info.put("workerId", workerId.value())
+
+        return new SnowflakeInfo(
+                snowflakeService.isInitialized(),
+                snowflakeService.getWorkerId().map(workerId -> (int) workerId.value()).orElse(null),
+                snowflakeService.getDatacenterId().map(datacenterId -> (int) datacenterId.value()).orElse(null),
+                snowflakeService.getEpoch().orElse(null)
         );
-        
-        snowflakeService.getDatacenterId().ifPresent(datacenterId -> 
-            info.put("datacenterId", datacenterId.value())
-        );
-        
-        snowflakeService.getEpoch().ifPresent(epoch ->
-            info.put("epoch", epoch)
-        );
-        
-        return info;
     }
     
     // ========== Health Check ==========
@@ -220,34 +242,24 @@ public class IdGeneratorApplicationService {
      * 
      * @return map containing health status information
      */
-    public Map<String, Object> getHealthStatus() {
+    public HealthStatus getHealthStatus() {
         log.debug("Getting health status");
-        
-        Map<String, Object> health = new HashMap<>();
-        
-        // Overall status
+
         boolean segmentHealthy = segmentService.isInitialized();
         boolean snowflakeHealthy = snowflakeService.isInitialized();
-        
-        health.put("status", (segmentHealthy && snowflakeHealthy) ? "UP" : "DEGRADED");
-        
-        // Segment service health
-        Map<String, Object> segmentHealth = new HashMap<>();
-        segmentHealth.put("initialized", segmentHealthy);
-        segmentHealth.put("bizTagCount", segmentService.getAllBizTags().size());
-        health.put("segment", segmentHealth);
-        
-        // Snowflake service health
-        Map<String, Object> snowflakeHealth = new HashMap<>();
-        snowflakeHealth.put("initialized", snowflakeHealthy);
-        snowflakeService.getWorkerId().ifPresent(workerId -> 
-            snowflakeHealth.put("workerId", workerId.value())
+
+        HealthStatus health = new HealthStatus(
+                (segmentHealthy && snowflakeHealthy) ? "UP" : "DEGRADED",
+                "id-generator-service",
+                System.currentTimeMillis(),
+                new HealthStatus.SegmentHealth(segmentHealthy, segmentService.getAllBizTags().size()),
+                new HealthStatus.SnowflakeHealth(
+                        snowflakeHealthy,
+                        snowflakeService.getWorkerId().map(workerId -> (int) workerId.value()).orElse(null),
+                        snowflakeService.getDatacenterId().map(datacenterId -> (int) datacenterId.value()).orElse(null)
+                )
         );
-        snowflakeService.getDatacenterId().ifPresent(datacenterId -> 
-            snowflakeHealth.put("datacenterId", datacenterId.value())
-        );
-        health.put("snowflake", snowflakeHealth);
-        
+
         log.debug("Health status: {}", health);
         return health;
     }

@@ -28,7 +28,6 @@
         <spring-boot.version>3.2.1</spring-boot.version>
         
         <!-- Dependencies -->
-        <curator.version>5.5.0</curator.version>
         <mybatis-spring-boot.version>3.0.3</mybatis-spring-boot.version>
         <jqwik.version>1.8.2</jqwik.version>
         <lombok.version>1.18.30</lombok.version>
@@ -50,23 +49,6 @@
                 <groupId>com.architectcgz</groupId>
                 <artifactId>id-generator-client</artifactId>
                 <version>${project.version}</version>
-            </dependency>
-
-            <!-- Apache Curator -->
-            <dependency>
-                <groupId>org.apache.curator</groupId>
-                <artifactId>curator-framework</artifactId>
-                <version>${curator.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.curator</groupId>
-                <artifactId>curator-recipes</artifactId>
-                <version>${curator.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.curator</groupId>
-                <artifactId>curator-test</artifactId>
-                <version>${curator.version}</version>
             </dependency>
 
             <!-- MyBatis -->

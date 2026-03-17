@@ -1,6 +1,8 @@
 # ID Generator 优化 TODO
 
 > 基于代码审查 + Q&A 讨论整理，2026-02-28
+>
+> 注：本文是 2026-02-28 的历史 backlog，其中部分条目仍基于早期 ZooKeeper/DB 双轨方案。自 2026-03-10 起，项目已收敛为 PostgreSQL-only Worker ID 分配，当前运行架构请以 [docs/architecture.md](./architecture.md) 和 `docs/todos/2026-03-10-review-fixes.md` 为准。
 
 ---
 

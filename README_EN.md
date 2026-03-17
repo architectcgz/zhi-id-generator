@@ -26,7 +26,7 @@ English | [简体中文](./README.md)
 #### Using Docker (Recommended)
 
 ```bash
-# Start infrastructure (PostgreSQL + ZooKeeper)
+# Start infrastructure (PostgreSQL)
 cd docker/scripts
 ./start-infra.sh    # Linux/Mac
 start-infra.bat     # Windows
@@ -47,8 +47,8 @@ start-full.bat      # Windows
 #### Verify Service
 
 ```bash
-curl http://localhost:8010/actuator/health
-curl http://localhost:8010/api/v1/id/snowflake
+curl http://localhost:8011/actuator/health
+curl http://localhost:8011/api/v1/id/snowflake
 ```
 
 ### 2. Integrate into Your Project
@@ -70,7 +70,7 @@ curl http://localhost:8010/api/v1/id/snowflake
 ```yaml
 id-generator:
   client:
-    server-url: http://localhost:8010
+    server-url: http://localhost:8011
     buffer-enabled: true
     buffer-size: 100
 ```
@@ -113,7 +113,7 @@ public class OrderService {
 ```java
 // Create client configuration
 IdGeneratorClientConfig config = IdGeneratorClientConfig.builder()
-    .serverUrl("http://localhost:8010")
+    .serverUrl("http://localhost:8011")
     .bufferSize(100)
     .bufferEnabled(true)
     .build();
@@ -192,9 +192,12 @@ mvn clean package
 For detailed Docker deployment instructions, see [docker/README.md](docker/README.md)
 
 ```bash
+# Build the executable server JAR from the repository root first
+mvn -q -pl id-generator-server -am -DskipTests package
+
 # Start infrastructure
 cd docker
-docker-compose up -d postgres zookeeper
+docker-compose up -d id-generator-postgres
 
 # Start full environment (including service)
 docker-compose --profile full up -d
@@ -223,8 +226,42 @@ docker-compose down
 - `GET /api/v1/id/health` - Health check
 - `GET /actuator/health` - Spring Boot health check
 
+### Response Shape
+
+Business APIs consistently return `ApiResponse<T>`. Structured fields from query endpoints are nested under `data`:
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "status": "UP",
+    "service": "id-generator-service",
+    "segment": {
+      "initialized": true,
+      "bizTagCount": 2
+    },
+    "snowflake": {
+      "initialized": true,
+      "workerId": 7,
+      "datacenterId": 3
+    }
+  }
+}
+```
+
+Query endpoints:
+
+- `/api/v1/id/health` -> `data.status`, `data.segment.*`, `data.snowflake.*`
+- `/api/v1/id/snowflake/info` -> `data.initialized`, `data.workerId`, `data.datacenterId`, `data.epoch`
+- `/api/v1/id/snowflake/parse/{id}` -> parsed fields such as `data.id`, `data.timestamp`, `data.sequence`
+- `/api/v1/id/cache/{bizTag}` -> cache snapshot fields such as `data.currentSegment` and `data.nextSegment`
+
+Common failure responses include `errorCode`, for example `BIZ_TAG_NOT_EXISTS`, `SEGMENT_UPDATE_FAILED`, `SERVICE_SHUTTING_DOWN`, and `SNOWFLAKE_NOT_INITIALIZED`. Unexpected internal state errors are normalized to `ILLEGAL_STATE` with HTTP 500.
+
 ## 📖 Documentation
 
+- [📗 Service Usage Guide](docs/USAGE_GUIDE.md) - Startup, API usage, SDK integration, and troubleshooting
 - [📘 Integration Guide](docs/INTEGRATION_GUIDE.md) - Detailed integration steps and examples
 - [📝 Quick Reference](docs/QUICK_REFERENCE.md) - Common commands and code snippets
 - [🐳 Docker Deployment](docker/README.md) - Docker deployment guide
@@ -242,7 +279,7 @@ Key configuration items:
 # Database configuration
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5434/id_generator
+    url: jdbc:postgresql://localhost:5435/id_generator
     username: id_gen_user
     password: id_gen_password
 
@@ -250,11 +287,9 @@ spring:
 id-generator:
   snowflake:
     datacenter-id: 0
-    enable-zookeeper: true
-    
-  # ZooKeeper configuration
-  zookeeper:
-    connection-string: localhost:2181
+    worker-id: -1
+    worker-id-lease-timeout: 10m
+    worker-id-renew-interval: 3m
 ```
 
 ### Client Configuration
@@ -262,7 +297,7 @@ id-generator:
 ```yaml
 id-generator:
   client:
-    server-url: http://localhost:8010
+    server-url: http://localhost:8011
     buffer-enabled: true
     buffer-size: 100
     refill-threshold: 20
@@ -282,7 +317,7 @@ id-generator:
 - **Language**: Java 17
 - **Framework**: Spring Boot 3.2.1
 - **Database**: PostgreSQL 16
-- **Coordination**: ZooKeeper 3.8
+- **Worker ID Allocation**: PostgreSQL lease-based allocation
 - **ORM**: MyBatis 3.0.3
 - **Build Tool**: Maven 3.9+
 
@@ -302,10 +337,10 @@ id-generator:
                            │
               ┌────────────┼────────────┐
               │                         │
-       ┌──────▼──────┐          ┌──────▼──────┐
-       │  PostgreSQL │          │  ZooKeeper  │
-       │  (Segment)  │          │ (Snowflake) │
-       └─────────────┘          └─────────────┘
+       ┌───────────────────────────────▼───────────────────────────────┐
+       │                         PostgreSQL                             │
+       │ Segment allocation + Snowflake worker-id lease acquisition    │
+       └───────────────────────────────────────────────────────────────┘
 ```
 
 ## 🤝 Contributing

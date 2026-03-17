@@ -5,7 +5,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
-@MapperScan("com.platform.idgen.mapper")
+@MapperScan("com.platform.idgen.infrastructure.persistence.mapper")
 public class IdGeneratorApplication {
 
     public static void main(String[] args) {

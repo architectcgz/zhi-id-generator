@@ -1,218 +1,206 @@
 # ID Generator Docker Environment
 
-本目录包含运行ID Generator所需的Docker基础设施配置。
+本目录现在同时承载 `id-generator` 的两类 Docker 编排：
 
-## 基础设施组件
+- 共享基础设施部署：所有正式部署相关文件集中在当前目录
+- 本地开发验证：保留原有本地 PostgreSQL + 服务端编排
 
-- **PostgreSQL 16**: 用于存储Segment模式的ID分配信息
-- **ZooKeeper 3.8**: 用于Snowflake模式的分布式Worker ID管理
-- **ID Generator Server**: ID生成服务（可选，用于本地测试）
+共享部署所需的 Nginx、DB 初始化脚本、SQL 和 Dockerfile 都已经收敛到 `docker/` 下，不再依赖 `deploy/` 和根目录的零散基础设施文件。
+
+## 目录结构
+
+```text
+id-generator/docker/
+├── Dockerfile
+├── docker-compose.shared.yml
+├── docker-compose.scale.yml
+├── docker-compose.yml
+├── docker-compose.multi.yml
+├── init-id-generator-db.sh
+├── nginx/
+│   └── id-generator-lb.conf
+├── postgres/
+├── schema/
+│   └── schema.sql
+└── scripts/
+```
+
+## 共享基础设施部署
+
+当前推荐的共享部署入口都在本目录：
+
+- 单实例：`docker-compose.shared.yml`
+- 扩缩容：`docker-compose.scale.yml`
+
+依赖与 `file-service` 保持一致：
+
+- PostgreSQL: `shared-postgres:5432`
+- Redis: `shared-redis:6379`（当前服务未使用，但共享网络保持一致）
+- Docker Network: `shared-infra`
+
+### 单实例
+
+```bash
+# 先在仓库根目录构建可执行服务端 JAR
+cd /home/azhi/workspace/projects/id-generator
+mvn -q -pl id-generator-server -am -DskipTests package
+
+# 启动共享基础设施
+cd /home/azhi/workspace/projects/infra
+docker compose up -d
+
+# 启动单实例
+cd /home/azhi/workspace/projects/id-generator/docker
+cp .env.shared.example .env
+docker compose -f docker-compose.shared.yml up -d
+```
+
+### 扩缩容
+
+```bash
+# 先在仓库根目录构建可执行服务端 JAR
+cd /home/azhi/workspace/projects/id-generator
+mvn -q -pl id-generator-server -am -DskipTests package
+
+# 启动共享基础设施
+cd /home/azhi/workspace/projects/infra
+docker compose up -d
+
+# 启动 2 个实例，8011 为 Nginx 统一入口
+cd /home/azhi/workspace/projects/id-generator/docker
+cp .env.shared.example .env
+docker compose -f docker-compose.scale.yml up -d --scale id-generator=2
+```
+
+扩到 3 个及以上实例时，需要同步修改 [nginx/id-generator-lb.conf](/home/azhi/workspace/projects/id-generator/docker/nginx/id-generator-lb.conf)。
+
+## 本地开发编排
+
+本地开发环境仍然保留在当前目录，适合不依赖共享 `infra` 的单机验证。
+
+### 组件
+
+- `id-generator-postgres`: 存储 `leaf_alloc` 和 `worker_id_alloc`
+- `id-generator-server`: 可选，方便直接本地验证 API
 
 ## 快速开始
 
-### 方式一：使用便捷脚本（推荐）
+### Linux / Mac
 
-#### Windows系统
+```bash
+# 先在仓库根目录构建可执行服务端 JAR
+cd ..
+mvn -q -pl id-generator-server -am -DskipTests package
+
+cd docker/scripts
+chmod +x *.sh
+
+# 仅启动数据库
+./start-infra.sh
+
+# 启动完整环境
+./start-full.sh
+
+# 启动多实例测试
+./start-multi.sh
+
+# 检查状态
+./check-health.sh
+
+# 停止环境
+./stop-infra.sh
+```
+
+### Windows
 
 ```cmd
-# 仅启动基础设施（PostgreSQL + ZooKeeper）
 cd docker\scripts
+
 start-infra.bat
-
-# 启动完整环境（包括服务）
 start-full.bat
-
-# 检查服务健康状态
 check-health.bat
-
-# 停止服务
 stop-infra.bat
 ```
 
-#### Linux/Mac系统
+## 直接使用 Docker Compose
 
 ```bash
-# 仅启动基础设施（PostgreSQL + ZooKeeper）
-cd docker/scripts
-chmod +x *.sh
-./start-infra.sh
+# 先在仓库根目录构建可执行服务端 JAR
+cd ..
+mvn -q -pl id-generator-server -am -DskipTests package
 
-# 启动完整环境（包括服务）
-./start-full.sh
-
-# 启动多实例测试环境
-./start-multi.sh
-
-# 检查服务健康状态
-./check-health.sh
-
-# 停止服务
-./stop-infra.sh
-
-# 重置所有数据
-./reset-data.sh
-```
-
-### 方式二：直接使用Docker Compose
-
-#### 1. 仅启动基础设施（推荐用于开发）
-
-```bash
 cd docker
-docker-compose up -d postgres zookeeper
-```
 
-这将启动PostgreSQL和ZooKeeper，你可以在IDE中直接运行ID Generator Server进行开发调试。
+# 仅启动数据库
+docker-compose up -d id-generator-postgres
 
-#### 2. 启动完整环境（包括服务）
-
-```bash
-cd docker
+# 启动完整环境
 docker-compose --profile full up -d
-```
 
-这将启动所有服务，包括ID Generator Server。
-
-#### 3. 停止服务
-
-```bash
-cd docker
+# 停止环境
 docker-compose down
 ```
 
-#### 4. 停止服务并清理数据
-
-```bash
-cd docker
-docker-compose down -v
-```
-
-## 服务端口
+## 端口
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| PostgreSQL | 5434 | 数据库端口 |
-| ZooKeeper | 2181 | 客户端连接端口 |
-| ZooKeeper Admin | 8080 | 管理端口 |
-| ID Generator Server | 8010 | HTTP API端口 |
+| PostgreSQL | 5435 | 数据库 |
+| ID Generator Server | 8011 | HTTP API |
 
-## 环境变量配置
+## 关键环境变量
 
-复制 `.env.example` 为 `.env` 并根据需要修改：
+复制 `.env.example` 为 `.env`：
 
 ```bash
 cp .env.example .env
 ```
 
-主要配置项：
+共享基础设施部署建议复制 `.env.shared.example` 为 `.env`：
 
-- `POSTGRES_*`: PostgreSQL数据库配置
-- `DATACENTER_ID`: 数据中心ID (0-31)
-- `WORKER_ID`: Worker ID (-1表示从ZooKeeper获取)
-- `ENABLE_ZOOKEEPER`: 是否启用ZooKeeper
-- `SNOWFLAKE_EPOCH`: Snowflake算法的起始时间戳
+```bash
+cp .env.shared.example .env
+```
+
+常用配置：
+
+- `POSTGRES_*`: PostgreSQL 配置
+- `DB_*`: 共享 PostgreSQL 配置
+- `DATACENTER_ID`: Snowflake 数据中心 ID
+- `WORKER_ID`: 固定 Worker ID，`-1` 表示自动从数据库抢占
+- `SNOWFLAKE_EPOCH`: Snowflake 纪元
+- `CLOCK_BACKWARDS_MAX_WAIT`: 小回拨等待阈值
+- `CLOCK_BACKWARDS_ALERT_THRESHOLD`: 回拨告警阈值
 
 ## 数据持久化
 
-以下数据会持久化到Docker volumes：
+- `postgres_data`: PostgreSQL 数据
 
-- `postgres_data`: PostgreSQL数据
-- `zookeeper_data`: ZooKeeper数据
-- `zookeeper_datalog`: ZooKeeper事务日志
-- `zookeeper_logs`: ZooKeeper日志
-
-## 健康检查
-
-所有服务都配置了健康检查：
+## 常用排查命令
 
 ```bash
-# 查看服务状态
-docker-compose ps
+# 查看数据库日志
+docker-compose logs -f id-generator-postgres
 
 # 查看服务日志
-docker-compose logs -f postgres
-docker-compose logs -f zookeeper
 docker-compose logs -f id-generator-server
-```
 
-## 数据库初始化
-
-PostgreSQL容器启动时会自动执行 `../sql/schema.sql` 脚本，创建必要的表和初始数据。
-
-## ZooKeeper管理
-
-### 使用ZooKeeper CLI
-
-```bash
-# 进入ZooKeeper容器
-docker exec -it id-generator-zookeeper zkCli.sh
-
-# 查看Worker ID节点
-ls /leaf/id-generator/snowflake
-
-# 查看特定Worker节点信息
-get /leaf/id-generator/snowflake/worker-0
-```
-
-### 使用ZooKeeper Admin Server
-
-访问 http://localhost:8080/commands 查看ZooKeeper状态。
-
-## 故障排查
-
-### PostgreSQL连接失败
-
-```bash
-# 检查PostgreSQL日志
-docker-compose logs postgres
-
-# 测试数据库连接
+# 进入数据库容器
 docker exec -it id-generator-postgres psql -U id_gen_user -d id_generator
 ```
 
-### ZooKeeper连接失败
+## 多实例说明
 
-```bash
-# 检查ZooKeeper日志
-docker-compose logs zookeeper
+多实例测试依赖 `worker_id_alloc` 表自动分配 Worker ID，不需要额外协调组件。
 
-# 测试ZooKeeper连接
-echo ruok | nc localhost 2181
-```
+如果需要更多实例：
 
-### 服务启动失败
+- 调整端口映射范围
+- 确保 `worker_id_alloc` 表和 `datacenter-id` 规划满足容量要求
 
-```bash
-# 查看服务日志
-docker-compose logs id-generator-server
+## 生产建议
 
-# 重启服务
-docker-compose restart id-generator-server
-```
-
-## 多实例部署
-
-如需启动多个ID Generator实例进行测试：
-
-```bash
-# 启动第一个实例
-docker-compose --profile full up -d
-
-# 启动第二个实例（不同端口）
-docker-compose -f docker-compose.yml -f docker-compose.multi.yml up -d id-generator-server-2
-```
-
-## 生产环境注意事项
-
-1. **修改默认密码**: 更改PostgreSQL和其他服务的默认密码
-2. **资源限制**: 为容器配置适当的CPU和内存限制
-3. **网络隔离**: 使用适当的网络策略隔离服务
-4. **监控告警**: 配置监控和告警系统
-5. **备份策略**: 定期备份PostgreSQL和ZooKeeper数据
-6. **ZooKeeper集群**: 生产环境建议使用ZooKeeper集群（至少3节点）
-
-## 参考资料
-
-- [PostgreSQL Docker Hub](https://hub.docker.com/_/postgres)
-- [ZooKeeper Docker Hub](https://hub.docker.com/_/zookeeper)
-- [Docker Compose Documentation](https://docs.docker.com/compose/)
+1. 修改默认数据库密码
+2. 为 PostgreSQL 做备份与监控
+3. 结合实例数量规划 `datacenter-id` / `worker-id` 容量
+4. 在部署前初始化好 `worker_id_alloc` 和 `leaf_alloc`

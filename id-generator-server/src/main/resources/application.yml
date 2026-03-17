@@ -1,5 +1,13 @@
 server:
   port: 8011
+  tomcat:
+    threads:
+      max: 400
+      min-spare: 20
+    max-connections: 8192
+    accept-count: 1000
+    connection-timeout: 5s
+    keep-alive-timeout: 20s
 
 spring:
   application:
@@ -7,7 +15,7 @@ spring:
   
   datasource:
     driver-class-name: org.postgresql.Driver
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5435}/id_generator
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5435}/${DB_NAME:id_generator}
     username: ${DB_USER:id_gen_user}
     password: ${DB_PASSWORD:id_gen_password}
     hikari:
@@ -40,24 +48,18 @@ id-generator:
     # Datacenter ID (0-31), set via environment for multi-DC
     datacenter-id: ${DATACENTER_ID:0}
     
-    # Worker ID (0-31), used when ZooKeeper is disabled or as fallback
-    # Set to -1 to force ZooKeeper registration
+    # Worker ID (0-31)
+    # Set to -1 to force database auto-allocation
     worker-id: ${WORKER_ID:-1}
-    
-    # Enable ZooKeeper for distributed Worker ID management
-    # When true: Worker ID is obtained from ZooKeeper
-    # When false: Uses database-based Worker ID allocation
-    enable-zookeeper: ${ENABLE_ZOOKEEPER:false}
 
     # Local cache file path for Worker ID persistence
-    # Used for fallback when ZooKeeper/DB is unavailable
     worker-id-cache-path: ${WORKER_ID_CACHE_PATH:/data/leaf/workerID.properties}
 
-    # Worker ID 租约超时时间（数据库模式）
+    # Worker ID 租约超时时间
     # 超过此时间未续期的 Worker ID 视为过期，可被其他实例回收
     worker-id-lease-timeout: ${WORKER_ID_LEASE_TIMEOUT:10m}
 
-    # Worker ID 租约续期间隔（数据库模式）
+    # Worker ID 租约续期间隔
     # 建议设置为 lease-timeout 的 1/3 左右
     worker-id-renew-interval: ${WORKER_ID_RENEW_INTERVAL:3m}
     
@@ -70,60 +72,17 @@ id-generator:
     clock-backwards:
       # Maximum wait time for clock to catch up (milliseconds)
       # When clock drift <= max-wait-ms, wait for clock to catch up
-      # When clock drift > max-wait-ms, use cached timestamp
+      # When clock drift > max-wait-ms, switch backup worker ID or refuse generation
       max-wait-ms: ${CLOCK_BACKWARDS_MAX_WAIT:5}
-      
-      # Enable startup clock validation
-      # When true, validates clock on startup against ZooKeeper recorded time
-      startup-check-enabled: ${CLOCK_BACKWARDS_STARTUP_CHECK:true}
-      
-      # ZooKeeper time synchronization interval (milliseconds)
-      # How often to report current timestamp to ZooKeeper
-      zk-time-sync-interval: ${CLOCK_BACKWARDS_ZK_SYNC_INTERVAL:3000}
       
       # Alert threshold for clock drift (milliseconds)
       # Trigger alert when clock drift exceeds this threshold
       alert-threshold-ms: ${CLOCK_BACKWARDS_ALERT_THRESHOLD:10}
-  
-  # ZooKeeper Configuration
-  zookeeper:
-    # ZooKeeper connection string
-    # Format: host1:port1,host2:port2,host3:port3
-    connection-string: ${ZOOKEEPER_CONNECTION_STRING:localhost:2181}
-    
-    # Session timeout (milliseconds)
-    # ZooKeeper session timeout - if no heartbeat within this time, session expires
-    session-timeout-ms: ${ZOOKEEPER_SESSION_TIMEOUT:60000}
-    
-    # Connection timeout (milliseconds)
-    # Maximum time to wait for initial connection to ZooKeeper
-    connection-timeout-ms: ${ZOOKEEPER_CONNECTION_TIMEOUT:15000}
-    
-    # Base path for ZooKeeper nodes
-    # All Worker ID nodes will be created under this path
-    base-path: ${ZOOKEEPER_BASE_PATH:/leaf}
-    
-    # Service name for ZooKeeper node path
-    # Used to create service-specific path: {base-path}/{service-name}/snowflake
-    service-name: ${ZOOKEEPER_SERVICE_NAME:id-generator}
-    
-    # Retry policy configuration
-    retry:
-      # Maximum number of retry attempts
-      max-retries: ${ZOOKEEPER_MAX_RETRIES:3}
-      
-      # Base sleep time between retries (milliseconds)
-      # Actual sleep time increases exponentially: base-sleep-time-ms * (2 ^ retry-count)
-      base-sleep-time-ms: ${ZOOKEEPER_BASE_SLEEP_TIME:1000}
-      
-      # Maximum sleep time between retries (milliseconds)
-      # Caps the exponential backoff to prevent excessive wait times
-      max-sleep-time-ms: ${ZOOKEEPER_MAX_SLEEP_TIME:10000}
 
 logging:
   level:
     root: INFO
-    com.platform.idgen: DEBUG
+    com.platform.idgen: INFO
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
 

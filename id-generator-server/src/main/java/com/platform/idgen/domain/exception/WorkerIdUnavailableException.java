@@ -4,7 +4,7 @@ package com.platform.idgen.domain.exception;
  * Exception thrown when WorkerId cannot be obtained.
  * 
  * This exception may occur in the following situations:
- * - ZooKeeper registration failed
+ * - Database lease acquisition failed
  * - Local cache unavailable or corrupted
  * - WorkerId conflict detected
  * - All WorkerIds are in use
@@ -29,7 +29,7 @@ public class WorkerIdUnavailableException extends IdGenerationException {
      * @param cause the underlying exception that caused this failure
      */
     public WorkerIdUnavailableException(String reason, Throwable cause) {
-        super(ErrorCode.WORKER_ID_UNAVAILABLE, cause);
+        super(ErrorCode.WORKER_ID_UNAVAILABLE, reason, cause);
         this.reason = reason;
     }
     

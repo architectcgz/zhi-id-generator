@@ -1,5 +1,6 @@
 package com.platform.idgen.domain.service;
 
+import com.platform.idgen.domain.exception.IdGenerationException;
 import com.platform.idgen.domain.model.aggregate.SegmentBuffer;
 import com.platform.idgen.domain.model.aggregate.SegmentBuffer.Segment;
 import com.platform.idgen.domain.model.aggregate.SegmentBuffer.NextIdResult;
@@ -18,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -31,6 +33,19 @@ import java.util.concurrent.atomic.AtomicLong;
  * - Handles segment initialization and updates
  */
 public class SegmentDomainService {
+
+    public record SegmentStateSnapshot(long value, long max, int step, long idle) {}
+
+    public record SegmentCacheSnapshot(
+            String bizTag,
+            boolean initialized,
+            int currentPos,
+            boolean nextReady,
+            boolean loadingNextSegment,
+            int minStep,
+            long updateTimestamp,
+            SegmentStateSnapshot currentSegment,
+            SegmentStateSnapshot nextSegment) {}
     
     private static final Logger log = LoggerFactory.getLogger(SegmentDomainService.class);
     
@@ -219,6 +234,49 @@ public class SegmentDomainService {
     public List<String> getAllBizTags() {
         return new ArrayList<>(bufferCache.keySet());
     }
+
+    /**
+     * 获取指定 bizTag 的当前缓存快照，用于观测和诊断。
+     */
+    public Optional<SegmentCacheSnapshot> getCacheSnapshot(BizTag bizTag) {
+        if (bizTag == null) {
+            throw new IllegalArgumentException("BizTag cannot be null");
+        }
+
+        SegmentBuffer buffer = bufferCache.get(bizTag.value());
+        if (buffer == null) {
+            return Optional.empty();
+        }
+
+        buffer.rLock().lock();
+        try {
+            Segment current = buffer.getCurrentSegment();
+            Segment next = buffer.getNextSegment();
+            return Optional.of(new SegmentCacheSnapshot(
+                    bizTag.value(),
+                    buffer.isInitOk(),
+                    buffer.getCurrentPos(),
+                    buffer.isNextReady(),
+                    buffer.getThreadRunning().get(),
+                    buffer.getMinStep(),
+                    buffer.getUpdateTimestamp(),
+                    new SegmentStateSnapshot(
+                            current.getValue().get(),
+                            current.getMax(),
+                            current.getStep(),
+                            current.getIdle()
+                    ),
+                    new SegmentStateSnapshot(
+                            next.getValue().get(),
+                            next.getMax(),
+                            next.getStep(),
+                            next.getIdle()
+                    )
+            ));
+        } finally {
+            buffer.rLock().unlock();
+        }
+    }
     
     /**
      * Check if service is initialized.
@@ -244,33 +302,56 @@ public class SegmentDomainService {
      */
     public long generateId(BizTag bizTag) {
         if (!initOk) {
-            throw new IllegalStateException("SegmentDomainService not initialized");
+            throw new IdGenerationException(
+                    IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
+                    "SegmentDomainService not initialized");
         }
         
         if (bizTag == null) {
             throw new IllegalArgumentException("BizTag cannot be null");
         }
-        
-        // Get or create SegmentBuffer
+
+        boolean created = false;
         SegmentBuffer buffer = bufferCache.get(bizTag.value());
         if (buffer == null) {
             cacheMissCount.incrementAndGet();
-            throw new IllegalArgumentException("BizTag not found: " + bizTag.value());
+            SegmentBuffer newBuffer = new SegmentBuffer(bizTag);
+            SegmentBuffer existing = bufferCache.putIfAbsent(bizTag.value(), newBuffer);
+            buffer = existing != null ? existing : newBuffer;
+            created = existing == null;
+            if (created) {
+                log.info("Lazily created SegmentBuffer for bizTag: {}", bizTag.value());
+            }
+        } else {
+            cacheHitCount.incrementAndGet();
         }
-        
-        cacheHitCount.incrementAndGet();
         
         // Initialize buffer if needed
         if (!buffer.isInitOk()) {
             synchronized (buffer) {
                 if (!buffer.isInitOk()) {
-                    initializeBuffer(bizTag, buffer);
+                    try {
+                        initializeBuffer(bizTag, buffer);
+                    } catch (RuntimeException e) {
+                        // 首次懒创建但初始化失败时回滚缓存，避免把无效 buffer 长期留在内存里。
+                        if (created) {
+                            bufferCache.remove(bizTag.value(), buffer);
+                        }
+                        throw e;
+                    }
                 }
             }
         }
         
         // 由 nextId() 内部在锁内检查是否需要异步加载，避免外部检查的竞态
-        SegmentBuffer.NextIdResult result = buffer.nextId();
+        SegmentBuffer.NextIdResult result;
+        try {
+            result = buffer.nextId();
+        } catch (IllegalStateException e) {
+            throw new IdGenerationException(
+                    IdGenerationException.ErrorCode.SEGMENTS_NOT_READY,
+                    "bizTag=" + bizTag.value() + ", reason=" + e.getMessage());
+        }
 
         // 根据 nextId 返回的标志触发异步加载
         if (result.isShouldLoadNext()) {
@@ -298,7 +379,8 @@ public class SegmentDomainService {
         try {
             // 从数据库加载号段分配信息
             SegmentAllocation allocation = leafAllocRepository.findByBizTag(bizTag)
-                    .orElseThrow(() -> new RuntimeException("BizTag not found in database: " + bizTag.value()));
+                    .orElseThrow(() -> new IdGenerationException(
+                            IdGenerationException.ErrorCode.BIZ_TAG_NOT_EXISTS, bizTag.value()));
 
             // Set minimum step from database config
             buffer.setMinStep(allocation.getStep());
@@ -312,10 +394,13 @@ public class SegmentDomainService {
             buffer.setInitOk(true);
             
             log.info("Buffer initialized successfully for bizTag: {}", bizTag.value());
-            
+        } catch (IdGenerationException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Failed to initialize buffer for bizTag: {}", bizTag.value(), e);
-            throw new RuntimeException("Failed to initialize buffer for bizTag: " + bizTag.value(), e);
+            throw new IdGenerationException(
+                    IdGenerationException.ErrorCode.SEGMENT_UPDATE_FAILED,
+                    "Failed to initialize buffer for bizTag: " + bizTag.value());
         }
     }
     
@@ -337,7 +422,8 @@ public class SegmentDomainService {
                 if (!buffer.isInitOk()) {
                     // First initialization: use database configured step
                     allocation = leafAllocRepository.findByBizTag(bizTag)
-                            .orElseThrow(() -> new RuntimeException("BizTag not found: " + bizTag.value()));
+                            .orElseThrow(() -> new IdGenerationException(
+                                    IdGenerationException.ErrorCode.BIZ_TAG_NOT_EXISTS, bizTag.value()));
                     stepToUse = allocation.getStep();
                     buffer.setMinStep(stepToUse);
                     buffer.setUpdateTimestamp(System.currentTimeMillis());
@@ -364,12 +450,15 @@ public class SegmentDomainService {
                 segment.setStep(allocation.getStep());
                 
                 log.info("Updated segment from database - bizTag: {}, segment: {}", bizTag.value(), segment);
-                
+            } catch (IdGenerationException e) {
+                throw e;
             } catch (Exception e) {
                 // Record database update failure
                 dbUpdateFailure.increment();
                 log.error("Failed to update segment from database for bizTag: {}", bizTag.value(), e);
-                throw new RuntimeException("Failed to update segment from database: " + e.getMessage(), e);
+                throw new IdGenerationException(
+                        IdGenerationException.ErrorCode.SEGMENT_UPDATE_FAILED,
+                        "Failed to update segment from database for bizTag: " + bizTag.value());
             }
         });
     }

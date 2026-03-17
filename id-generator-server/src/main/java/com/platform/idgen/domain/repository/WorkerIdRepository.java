@@ -15,18 +15,15 @@ import java.util.Optional;
 public interface WorkerIdRepository extends WorkerTimestampCache {
     
     /**
-     * Register a WorkerId for service instance.
-     * Tries ZooKeeper first, falls back to cache if ZooKeeper fails.
-     * 
-     * @param serviceName service name for building ZooKeeper path
-     * @return registered WorkerId
-     * @throws WorkerIdUnavailableException when both ZooKeeper and cache fail
+     * 为当前实例注册 Worker ID。
+     *
+     * @return 已注册的 WorkerId
+     * @throws WorkerIdUnavailableException 当无法安全获取 WorkerId 时抛出
      */
-    WorkerId registerWorkerId(String serviceName) throws WorkerIdUnavailableException;
+    WorkerId registerWorkerId() throws WorkerIdUnavailableException;
     
     /**
      * Load WorkerId from local cache file.
-     * Used as fallback when ZooKeeper is unavailable.
      * 
      * @return Optional containing cached WorkerId, empty if not found
      */
@@ -34,24 +31,22 @@ public interface WorkerIdRepository extends WorkerTimestampCache {
     
     /**
      * Cache WorkerId and its metadata to local file.
-     * Stores workerId, datacenterId, zkSequenceNumber for recovery.
+     * Stores workerId, datacenterId and auxiliary metadata for recovery.
      * 
      * @param workerId the WorkerId to cache
      * @param datacenterId the datacenter ID
-     * @param zkSequenceNumber the original ZooKeeper sequence number
+     * @param allocationSequence auxiliary allocation metadata, DB 模式下传 -1
      */
-    void cacheWorkerId(WorkerId workerId, long datacenterId, long zkSequenceNumber);
+    void cacheWorkerId(WorkerId workerId, long datacenterId, long allocationSequence);
     
     /**
-     * Release WorkerId by marking ZooKeeper node as offline.
-     * Called during graceful shutdown. Does not delete node to preserve WorkerId for restart.
+     * Release WorkerId during graceful shutdown.
      */
     void releaseWorkerId();
 
     /**
      * 检查当前持有的 Worker ID 是否仍然有效。
-     * DB 模式下，续期连续失败达到阈值后返回 false，表示租约可能已被回收。
-     * ZK 模式下始终返回 true（由 ZooKeeper 会话保证有效性）。
+     * 续期连续失败达到阈值后返回 false，表示租约可能已被回收。
      *
      * @return true 表示 Worker ID 有效，可继续生成 ID；false 表示存在冲突风险，应停止生成
      */
@@ -62,7 +57,6 @@ public interface WorkerIdRepository extends WorkerTimestampCache {
     /**
      * 获取一个备用 Worker ID 用于时钟回拨切换。
      * 消费后该备用 ID 从备用列表中移除，不可重复使用。
-     * ZK 模式不支持备用 ID，默认返回 empty。
      *
      * @return 备用 Worker ID，如果没有可用的备用 ID 则返回 Optional.empty()
      */

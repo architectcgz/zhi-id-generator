@@ -17,8 +17,6 @@ class WorkerIdTest {
     // ---- 有效值边界 ----
     private static final int VALID_MIN = WorkerId.MIN_VALUE;   // 0
     private static final int VALID_MAX = WorkerId.MAX_VALUE;   // 31
-    private static final int MODULO_BASE = VALID_MAX + 1;      // 32
-
     @Test
     @DisplayName("最小有效值 0 创建成功")
     void 最小有效值创建成功() {
@@ -48,33 +46,6 @@ class WorkerIdTest {
         assertThatThrownBy(() -> new WorkerId(invalidValue))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("WorkerId must be between");
-    }
-
-    @Test
-    @DisplayName("fromSequenceNumber 正向序号正确映射到 [0,31]")
-    void fromSequenceNumber_正向序号正确映射() {
-        // 序号 0 -> workerId 0
-        assertThat(WorkerId.fromSequenceNumber(0).value()).isEqualTo(0);
-        // 序号 31 -> workerId 31
-        assertThat(WorkerId.fromSequenceNumber(VALID_MAX).value()).isEqualTo(VALID_MAX);
-        // 序号 32 -> workerId 0（回绕）
-        assertThat(WorkerId.fromSequenceNumber(MODULO_BASE).value()).isEqualTo(0);
-        // 序号 63 -> workerId 31
-        assertThat(WorkerId.fromSequenceNumber(MODULO_BASE + VALID_MAX).value()).isEqualTo(VALID_MAX);
-        // 序号 100 -> 100 % 32 = 4
-        assertThat(WorkerId.fromSequenceNumber(100).value()).isEqualTo(100 % MODULO_BASE);
-    }
-
-    @Test
-    @DisplayName("fromSequenceNumber 负序号结果仍在 [0,31] 范围内")
-    void fromSequenceNumber_负序号结果非负() {
-        // Java 取模对负数可能返回负值，fromSequenceNumber 应修正为非负
-        for (int seq = -MODULO_BASE; seq < 0; seq++) {
-            WorkerId workerId = WorkerId.fromSequenceNumber(seq);
-            assertThat(workerId.value())
-                    .as("序号 %d 对应的 workerId 应在 [0,31]", seq)
-                    .isBetween(VALID_MIN, VALID_MAX);
-        }
     }
 
     @Test

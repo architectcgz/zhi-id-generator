@@ -26,7 +26,9 @@ public class GlobalExceptionHandler {
 
         HttpStatus status = switch (e.getErrorCode()) {
             case BIZ_TAG_NOT_EXISTS -> HttpStatus.NOT_FOUND;
-            case CACHE_NOT_INITIALIZED, SEGMENTS_NOT_READY, WORKER_ID_UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
+            case CACHE_NOT_INITIALIZED, SEGMENTS_NOT_READY, WORKER_ID_UNAVAILABLE, WORKER_ID_INVALID,
+                    SEGMENT_UPDATE_FAILED, SERVICE_SHUTTING_DOWN, SNOWFLAKE_NOT_INITIALIZED ->
+                    HttpStatus.SERVICE_UNAVAILABLE;
             case CLOCK_BACKWARDS -> HttpStatus.INTERNAL_SERVER_ERROR;
         };
 
@@ -51,9 +53,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<ApiResponse<Void>> handleIllegalStateException(IllegalStateException e) {
-        log.error("Invalid state: {}", e.getMessage());
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .body(ApiResponse.error(50302, "SERVICE_UNAVAILABLE", e.getMessage()));
+        log.error("Unexpected illegal state", e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(ApiResponse.error(50002, "ILLEGAL_STATE", "Internal state error"));
     }
 
     @ExceptionHandler(Exception.class)

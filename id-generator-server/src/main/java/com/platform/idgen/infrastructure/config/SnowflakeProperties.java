@@ -15,7 +15,7 @@ import java.time.Duration;
  * 
  * Configures Snowflake algorithm parameters including:
  * - Worker ID and Datacenter ID
- * - ZooKeeper integration settings
+ * - Database lease settings for Worker ID allocation
  * - Clock backwards handling configuration
  * - Worker ID cache settings
  */
@@ -34,25 +34,16 @@ public class SnowflakeProperties {
     private Integer datacenterId;
     
     /**
-     * Worker ID (0-31)
-     * Used when ZooKeeper is disabled or as fallback.
-     * Set to -1 to force ZooKeeper registration.
+     * Worker ID (0-31)。
+     * 设置为 -1 时由数据库自动分配。
      */
     @Min(value = -1, message = "Worker ID must be between -1 and 31 (-1 means auto-assign)")
     @Max(value = 31, message = "Worker ID must be between -1 and 31")
     private Integer workerId = -1;
     
     /**
-     * Enable ZooKeeper for distributed Worker ID management.
-     * When true, Worker ID is obtained from ZooKeeper.
-     * When false, uses configured workerId value.
-     */
-    @NotNull(message = "Enable ZooKeeper flag cannot be null")
-    private Boolean enableZookeeper = false;
-    
-    /**
      * Local cache file path for Worker ID persistence.
-     * Used for fallback when ZooKeeper is unavailable.
+     * 用于持久化最后一次使用的时间戳和当前 Worker ID 元数据。
      */
     @NotBlank(message = "Worker ID cache path cannot be empty")
     private String workerIdCachePath = "/data/leaf/workerID.properties";
@@ -69,7 +60,6 @@ public class SnowflakeProperties {
     /**
      * Worker ID 租约超时时间。
      * 超过此时间未续期的 active 记录视为过期，可被其他实例回收。
-     * 仅在 enable-zookeeper=false（数据库模式）时生效。
      */
     @NotNull(message = "Worker ID lease timeout cannot be null")
     private Duration workerIdLeaseTimeout = Duration.ofMinutes(10);
@@ -78,7 +68,6 @@ public class SnowflakeProperties {
      * Worker ID 租约续期间隔。
      * 定时更新 lease_time 防止被其他实例回收。
      * 建议设置为 lease-timeout 的 1/3 左右，确保续期频率足够。
-     * 仅在 enable-zookeeper=false（数据库模式）时生效。
      */
     @NotNull(message = "Worker ID renew interval cannot be null")
     private Duration workerIdRenewInterval = Duration.ofMinutes(3);
@@ -87,7 +76,6 @@ public class SnowflakeProperties {
      * 预分配的备用 Worker ID 数量（用于时钟回拨切换），默认 1。
      * 启动时会额外抢占此数量的 Worker ID 作为备用，
      * 当发生大回拨时切换到备用 ID 继续生成，避免服务中断。
-     * 仅在 enable-zookeeper=false（数据库模式）时生效。
      * 配置路径：id-generator.snowflake.backup-worker-id-count
      */
     @Min(value = 0, message = "Backup worker ID count must be non-negative")
@@ -107,21 +95,6 @@ public class SnowflakeProperties {
         @NotNull(message = "Max wait time cannot be null")
         @Min(value = 0, message = "Max wait time must be non-negative")
         private Long maxWaitMs = 5L;
-        
-        /**
-         * Enable startup clock validation.
-         * When true, validates clock on startup against ZooKeeper recorded time.
-         */
-        @NotNull(message = "Startup check enabled flag cannot be null")
-        private Boolean startupCheckEnabled = true;
-        
-        /**
-         * ZooKeeper time synchronization interval (milliseconds).
-         * How often to report current timestamp to ZooKeeper.
-         */
-        @NotNull(message = "ZK time sync interval cannot be null")
-        @Min(value = 1000, message = "ZK time sync interval must be at least 1000ms")
-        private Long zkTimeSyncInterval = 3000L;
         
         /**
          * Alert threshold for clock drift (milliseconds).
@@ -146,22 +119,6 @@ public class SnowflakeProperties {
         
         public void setMaxWaitMs(Long maxWaitMs) {
             this.maxWaitMs = maxWaitMs;
-        }
-        
-        public Boolean getStartupCheckEnabled() {
-            return startupCheckEnabled;
-        }
-        
-        public void setStartupCheckEnabled(Boolean startupCheckEnabled) {
-            this.startupCheckEnabled = startupCheckEnabled;
-        }
-        
-        public Long getZkTimeSyncInterval() {
-            return zkTimeSyncInterval;
-        }
-        
-        public void setZkTimeSyncInterval(Long zkTimeSyncInterval) {
-            this.zkTimeSyncInterval = zkTimeSyncInterval;
         }
         
         public Long getAlertThresholdMs() {
@@ -196,14 +153,6 @@ public class SnowflakeProperties {
     
     public void setWorkerId(Integer workerId) {
         this.workerId = workerId;
-    }
-    
-    public Boolean getEnableZookeeper() {
-        return enableZookeeper;
-    }
-    
-    public void setEnableZookeeper(Boolean enableZookeeper) {
-        this.enableZookeeper = enableZookeeper;
     }
     
     public String getWorkerIdCachePath() {

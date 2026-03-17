@@ -261,7 +261,10 @@ public class BufferedIdGeneratorClient implements IdGeneratorClient {
         try {
             String url = config.getServerUrl() + API_BASE_PATH + "/health";
             JsonNode response = executeGetRequest(url);
-            return response.has("status") && "UP".equals(response.get("status").asText());
+            JsonNode data = response.get("data");
+            return data != null
+                && data.has("status")
+                && "UP".equals(data.get("status").asText());
         } catch (Exception e) {
             log.debug("Health check failed", e);
             return false;

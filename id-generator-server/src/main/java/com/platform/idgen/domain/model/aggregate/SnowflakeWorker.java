@@ -8,6 +8,8 @@ import com.platform.idgen.domain.port.WorkerTimestampCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.function.LongSupplier;
+
 /**
  * SnowflakeWorker Aggregate Root
  * 
@@ -26,6 +28,11 @@ import org.slf4j.LoggerFactory;
 public class SnowflakeWorker {
 
     private static final Logger log = LoggerFactory.getLogger(SnowflakeWorker.class);
+
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(long millis) throws InterruptedException;
+    }
 
     /**
      * generateId() 的返回结果，包含生成的 ID 和是否发生了 sequence overflow
@@ -69,6 +76,11 @@ public class SnowflakeWorker {
     private final WorkerTimestampCache cache;
     private final long clockBackwardsWaitThresholdMs;
     private final long maxStartupWaitMs;
+    /**
+     * 默认使用基于 nanoTime 的单调时间源，规避运行期墙钟回拨导致的大量拒绝。
+     */
+    private final LongSupplier currentTimestampSupplier;
+    private final Sleeper sleeper;
 
     // 可变状态（由 synchronized 保护）
     /** 当前使用的 Worker ID，时钟回拨时可通过 switchWorkerId 切换；volatile 保证非 synchronized 读取的可见性 */
@@ -85,7 +97,8 @@ public class SnowflakeWorker {
      * @param cache 时间戳缓存端口，用于持久化/恢复时间戳
      */
     public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch, WorkerTimestampCache cache) {
-        this(workerId, datacenterId, epoch, cache, DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS, DEFAULT_MAX_STARTUP_WAIT_MS);
+        this(workerId, datacenterId, epoch, cache, DEFAULT_CLOCK_BACKWARDS_WAIT_THRESHOLD_MS,
+                DEFAULT_MAX_STARTUP_WAIT_MS, defaultTimestampSupplier(epoch), Thread::sleep);
     }
 
     /**
@@ -95,11 +108,25 @@ public class SnowflakeWorker {
     public SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch,
                            WorkerTimestampCache cache, long clockBackwardsWaitThresholdMs,
                            long maxStartupWaitMs) {
+        this(workerId, datacenterId, epoch, cache, clockBackwardsWaitThresholdMs,
+                maxStartupWaitMs, defaultTimestampSupplier(epoch), Thread::sleep);
+    }
+
+    SnowflakeWorker(WorkerId workerId, DatacenterId datacenterId, long epoch,
+                    WorkerTimestampCache cache, long clockBackwardsWaitThresholdMs,
+                    long maxStartupWaitMs, LongSupplier currentTimestampSupplier,
+                    Sleeper sleeper) {
         if (epoch < 0) {
             throw new IllegalArgumentException("Epoch must be non-negative, but got: " + epoch);
         }
         if (cache == null) {
             throw new IllegalArgumentException("WorkerTimestampCache cannot be null");
+        }
+        if (currentTimestampSupplier == null) {
+            throw new IllegalArgumentException("Current timestamp supplier cannot be null");
+        }
+        if (sleeper == null) {
+            throw new IllegalArgumentException("Sleeper cannot be null");
         }
 
         this.workerId = workerId;
@@ -108,6 +135,8 @@ public class SnowflakeWorker {
         this.cache = cache;
         this.clockBackwardsWaitThresholdMs = clockBackwardsWaitThresholdMs;
         this.maxStartupWaitMs = maxStartupWaitMs;
+        this.currentTimestampSupplier = currentTimestampSupplier;
+        this.sleeper = sleeper;
 
         // Load cached timestamp for recovery after restart
         cache.loadLastUsedTimestamp().ifPresent(cachedTimestamp -> {
@@ -128,8 +157,8 @@ public class SnowflakeWorker {
                     log.info("Current timestamp ({}) <= cached timestamp ({}), waiting {}ms for next millisecond",
                             currentTimestamp, cachedTimestamp, waitTime);
                     try {
-                        Thread.sleep(waitTime);
-                        this.lastTimestamp = getCurrentTimestamp();
+                        sleep(waitTime);
+                        this.lastTimestamp = waitForNextMillisecond(cachedTimestamp);
                         log.info("After waiting, updated lastTimestamp to: {}", this.lastTimestamp);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -208,11 +237,8 @@ public class SnowflakeWorker {
      * @throws ClockBackwardsException if clock moves backwards significantly
      */
     public synchronized GenerateResult generateId() {
-        long currentTimestamp = getCurrentTimestamp();
+        long currentTimestamp = normalizeTimestamp(getCurrentTimestamp());
         boolean overflow = false;
-
-        // Validate timestamp and handle clock backwards
-        validateTimestamp(currentTimestamp);
 
         // Handle sequence within the same millisecond
         if (currentTimestamp == lastTimestamp) {
@@ -239,20 +265,22 @@ public class SnowflakeWorker {
      * @return Current timestamp relative to epoch
      */
     private long getCurrentTimestamp() {
-        return System.currentTimeMillis() - epoch;
+        return currentTimestampSupplier.getAsLong();
     }
-    
+
     /**
      * Validate that the current timestamp is not earlier than the last timestamp
      * 
      * @param currentTimestamp The current timestamp to validate
+     * @return 可安全用于生成 ID 的时间戳
      * @throws ClockBackwardsException if clock moves backwards significantly
      */
-    private void validateTimestamp(long currentTimestamp) {
+    private long normalizeTimestamp(long currentTimestamp) {
         if (currentTimestamp < lastTimestamp) {
             long offset = lastTimestamp - currentTimestamp;
-            handleClockBackwards(offset);
+            return handleClockBackwards(currentTimestamp, offset);
         }
+        return currentTimestamp;
     }
     
     /**
@@ -262,21 +290,29 @@ public class SnowflakeWorker {
      * - If offset <= 5ms: Wait for clock to catch up
      * - If offset > 5ms: Use cached last timestamp and log warning (maintain availability)
      * 
+     * @param currentTimestamp 当前读取到的时间戳
      * @param offset The number of milliseconds the clock moved backwards
      */
-    private void handleClockBackwards(long offset) {
+    private long handleClockBackwards(long currentTimestamp, long offset) {
         log.warn("Clock moved backwards by {}ms. Last timestamp: {}, Current: {}",
-                 offset, lastTimestamp, getCurrentTimestamp());
+                 offset, lastTimestamp, currentTimestamp);
 
         if (offset <= clockBackwardsWaitThresholdMs) {
             log.info("Clock drift is small ({}ms <= {}ms), waiting for clock to catch up",
                      offset, clockBackwardsWaitThresholdMs);
             try {
-                Thread.sleep(offset);
+                sleep(offset);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new ClockBackwardsException(offset);
             }
+            long waitedTimestamp = getCurrentTimestamp();
+            if (waitedTimestamp < lastTimestamp) {
+                log.warn("Clock is still behind after waiting. Clamping timestamp from {} to {} to keep IDs monotonic",
+                        waitedTimestamp, lastTimestamp);
+                return lastTimestamp;
+            }
+            return waitedTimestamp;
         } else {
             // 大回拨直接拒绝生成，避免时间重叠区间产生重复 ID
             log.error("Clock drift is large ({}ms > {}ms), refusing to generate ID to prevent duplicates",
@@ -304,6 +340,12 @@ public class SnowflakeWorker {
         
         return timestamp;
     }
+
+    private void sleep(long millis) throws InterruptedException {
+        if (millis > 0) {
+            sleeper.sleep(millis);
+        }
+    }
     
     /**
      * Compose a 64-bit Snowflake ID from its components
@@ -317,5 +359,28 @@ public class SnowflakeWorker {
                 | (datacenterId.value() << DATACENTER_ID_SHIFT)
                 | (workerId.value() << WORKER_ID_SHIFT)
                 | sequence;
+    }
+
+    private static LongSupplier defaultTimestampSupplier(long epoch) {
+        return new MonotonicTimestampSupplier(epoch);
+    }
+
+    private static final class MonotonicTimestampSupplier implements LongSupplier {
+        private final long baseTimestamp;
+        private final long baseNanoTime;
+
+        private MonotonicTimestampSupplier(long epoch) {
+            this.baseTimestamp = System.currentTimeMillis() - epoch;
+            this.baseNanoTime = System.nanoTime();
+        }
+
+        @Override
+        public long getAsLong() {
+            long elapsedNanos = System.nanoTime() - baseNanoTime;
+            if (elapsedNanos <= 0) {
+                return baseTimestamp;
+            }
+            return baseTimestamp + (elapsedNanos / 1_000_000L);
+        }
     }
 }

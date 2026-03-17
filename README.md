@@ -26,7 +26,7 @@
 #### 使用Docker（推荐）
 
 ```bash
-# 启动基础设施（PostgreSQL + ZooKeeper）
+# 启动基础设施（PostgreSQL）
 cd docker/scripts
 ./start-infra.sh    # Linux/Mac
 start-infra.bat     # Windows
@@ -47,8 +47,8 @@ start-full.bat      # Windows
 #### 验证服务
 
 ```bash
-curl http://localhost:8010/actuator/health
-curl http://localhost:8010/api/v1/id/snowflake
+curl http://localhost:8011/actuator/health
+curl http://localhost:8011/api/v1/id/snowflake
 ```
 
 ### 2. 集成到你的项目
@@ -70,7 +70,7 @@ curl http://localhost:8010/api/v1/id/snowflake
 ```yaml
 id-generator:
   client:
-    server-url: http://localhost:8010
+    server-url: http://localhost:8011
     buffer-enabled: true
     buffer-size: 100
 ```
@@ -113,7 +113,7 @@ public class OrderService {
 ```java
 // 创建客户端配置
 IdGeneratorClientConfig config = IdGeneratorClientConfig.builder()
-    .serverUrl("http://localhost:8010")
+    .serverUrl("http://localhost:8011")
     .bufferSize(100)
     .bufferEnabled(true)
     .build();
@@ -192,9 +192,12 @@ mvn clean package
 详细的Docker部署说明请查看 [docker/README.md](docker/README.md)
 
 ```bash
+# 先在仓库根目录构建可执行服务端 JAR
+mvn -q -pl id-generator-server -am -DskipTests package
+
 # 启动基础设施
 cd docker
-docker-compose up -d postgres zookeeper
+docker-compose up -d id-generator-postgres
 
 # 启动完整环境（包括服务）
 docker-compose --profile full up -d
@@ -223,8 +226,42 @@ docker-compose down
 - `GET /api/v1/id/health` - 健康检查
 - `GET /actuator/health` - Spring Boot健康检查
 
+### 响应结构
+
+业务接口统一返回 `ApiResponse<T>`，查询类接口的结构化字段位于 `data` 下：
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "status": "UP",
+    "service": "id-generator-service",
+    "segment": {
+      "initialized": true,
+      "bizTagCount": 2
+    },
+    "snowflake": {
+      "initialized": true,
+      "workerId": 7,
+      "datacenterId": 3
+    }
+  }
+}
+```
+
+查询接口：
+
+- `/api/v1/id/health` -> `data.status`、`data.segment.*`、`data.snowflake.*`
+- `/api/v1/id/snowflake/info` -> `data.initialized`、`data.workerId`、`data.datacenterId`、`data.epoch`
+- `/api/v1/id/snowflake/parse/{id}` -> `data.id`、`data.timestamp`、`data.sequence` 等解析字段
+- `/api/v1/id/cache/{bizTag}` -> `data.currentSegment`、`data.nextSegment` 等缓存快照字段
+
+常见错误响应会返回 `errorCode`，例如 `BIZ_TAG_NOT_EXISTS`、`SEGMENT_UPDATE_FAILED`、`SERVICE_SHUTTING_DOWN`、`SNOWFLAKE_NOT_INITIALIZED`；未预期的内部状态错误统一返回 `ILLEGAL_STATE`（HTTP 500）。
+
 ## 📖 文档
 
+- [📗 服务使用文档](docs/USAGE_GUIDE.md) - 服务启动、API 调用、SDK 接入与排障
 - [📘 集成指南](docs/INTEGRATION_GUIDE.md) - 详细的集成步骤和示例
 - [📝 快速参考](docs/QUICK_REFERENCE.md) - 常用命令和代码片段
 - [🐳 Docker部署](docker/README.md) - Docker部署指南
@@ -242,7 +279,7 @@ docker-compose down
 # 数据库配置
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5434/id_generator
+    url: jdbc:postgresql://localhost:5435/id_generator
     username: id_gen_user
     password: id_gen_password
 
@@ -250,11 +287,9 @@ spring:
 id-generator:
   snowflake:
     datacenter-id: 0
-    enable-zookeeper: true
-    
-  # ZooKeeper配置
-  zookeeper:
-    connection-string: localhost:2181
+    worker-id: -1
+    worker-id-lease-timeout: 10m
+    worker-id-renew-interval: 3m
 ```
 
 ### 客户端配置
@@ -262,7 +297,7 @@ id-generator:
 ```yaml
 id-generator:
   client:
-    server-url: http://localhost:8010
+    server-url: http://localhost:8011
     buffer-enabled: true
     buffer-size: 100
     refill-threshold: 20
@@ -282,7 +317,7 @@ id-generator:
 - **语言**: Java 17
 - **框架**: Spring Boot 3.2.1
 - **数据库**: PostgreSQL 16
-- **协调服务**: ZooKeeper 3.8
+- **Worker ID 分配**: PostgreSQL 租约抢占
 - **ORM**: MyBatis 3.0.3
 - **构建工具**: Maven 3.9+
 
@@ -302,10 +337,10 @@ id-generator:
                            │
               ┌────────────┼────────────┐
               │                         │
-       ┌──────▼──────┐          ┌──────▼──────┐
-       │  PostgreSQL │          │  ZooKeeper  │
-       │  (Segment)  │          │ (Snowflake) │
-       └─────────────┘          └─────────────┘
+       ┌───────────────────────────────▼───────────────────────────────┐
+       │                         PostgreSQL                             │
+       │     Segment 号段分配 + Snowflake Worker ID 租约抢占/续期        │
+       └───────────────────────────────────────────────────────────────┘
 ```
 
 ## 🤝 贡献

@@ -1,5 +1,6 @@
 package com.platform.idgen.infrastructure.repository;
 
+import com.platform.idgen.domain.exception.IdGenerationException;
 import com.platform.idgen.domain.model.valueobject.BizTag;
 import com.platform.idgen.domain.model.valueobject.SegmentAllocation;
 import com.platform.idgen.domain.repository.LeafAllocRepository;
@@ -50,7 +51,7 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
     public SegmentAllocation updateMaxId(BizTag bizTag) {
         LeafAlloc current = mapper.findByBizTag(bizTag.value());
         if (current == null) {
-            throw new RuntimeException("BizTag not found: " + bizTag.value());
+            throw new IdGenerationException(IdGenerationException.ErrorCode.BIZ_TAG_NOT_EXISTS, bizTag.value());
         }
         return updateMaxIdByCustomStep(bizTag, current.getStep());
     }
@@ -61,7 +62,7 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
             // Read current state
             LeafAlloc current = mapper.findByBizTag(bizTag.value());
             if (current == null) {
-                throw new RuntimeException("BizTag not found: " + bizTag.value());
+                throw new IdGenerationException(IdGenerationException.ErrorCode.BIZ_TAG_NOT_EXISTS, bizTag.value());
             }
             
             // Try to update with optimistic lock
@@ -84,13 +85,16 @@ public class LeafAllocRepositoryImpl implements LeafAllocRepository {
                     Thread.sleep(RETRY_DELAY_MS * attempt);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted during retry", e);
+                    throw new IdGenerationException(
+                            IdGenerationException.ErrorCode.SEGMENT_UPDATE_FAILED,
+                            "Interrupted during retry for bizTag: " + bizTag.value());
                 }
             }
         }
         
-        throw new RuntimeException("Failed to update max_id after " + MAX_RETRY_ATTEMPTS +
-                                   " attempts for bizTag: " + bizTag.value());
+        throw new IdGenerationException(
+                IdGenerationException.ErrorCode.SEGMENT_UPDATE_FAILED,
+                "Failed to update max_id after " + MAX_RETRY_ATTEMPTS + " attempts for bizTag: " + bizTag.value());
     }
 
     private SegmentAllocation toSegmentAllocation(LeafAlloc alloc) {

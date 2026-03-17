@@ -33,7 +33,6 @@ public class SnowflakeDomainService {
 
     // 从配置注入的原始值，避免领域层直接依赖基础设施层的 Properties 类
     private final int configDatacenterId;
-    private final String configServiceName;
     private final long configEpoch;
     private final long alertThresholdMs;
     private final long clockBackwardsWaitThresholdMs;
@@ -56,7 +55,6 @@ public class SnowflakeDomainService {
     public SnowflakeDomainService(WorkerIdRepository workerIdRepository,
                                    MeterRegistry meterRegistry,
                                    int configDatacenterId,
-                                   String configServiceName,
                                    long configEpoch,
                                    long alertThresholdMs,
                                    long clockBackwardsWaitThresholdMs,
@@ -64,7 +62,6 @@ public class SnowflakeDomainService {
         this.workerIdRepository = workerIdRepository;
         this.meterRegistry = meterRegistry;
         this.configDatacenterId = configDatacenterId;
-        this.configServiceName = configServiceName;
         this.configEpoch = configEpoch;
         this.alertThresholdMs = alertThresholdMs;
         this.clockBackwardsWaitThresholdMs = clockBackwardsWaitThresholdMs;
@@ -102,13 +99,12 @@ public class SnowflakeDomainService {
     
     /**
      * Auto-initialize Snowflake Worker on application startup.
-     * Uses configuration from SnowflakeProperties and ZooKeeperProperties.
      */
     @PostConstruct
     public void autoInitialize() {
         try {
             DatacenterId datacenterId = new DatacenterId(configDatacenterId);
-            initialize(datacenterId, configServiceName, configEpoch);
+            initialize(datacenterId, configEpoch);
         } catch (Exception e) {
             log.warn("Failed to auto-initialize SnowflakeDomainService: {}", e.getMessage());
             log.warn("Snowflake ID generation will not be available until manually initialized");
@@ -120,17 +116,15 @@ public class SnowflakeDomainService {
      * Initialize Snowflake Worker including WorkerId registration and cached timestamp recovery.
      * 
      * @param datacenterId Datacenter ID for this instance
-     * @param serviceName Service name for ZooKeeper registration
      * @param epoch Epoch timestamp for Snowflake algorithm
      * @throws IdGenerationException if initialization fails
      */
-    public void initialize(DatacenterId datacenterId, String serviceName, long epoch) {
-        log.info("Initializing SnowflakeDomainService with datacenterId={}, serviceName={}, epoch={}", 
-                 datacenterId.value(), serviceName, epoch);
+    public void initialize(DatacenterId datacenterId, long epoch) {
+        log.info("Initializing SnowflakeDomainService with datacenterId={}, epoch={}",
+                datacenterId.value(), epoch);
         
         try {
-            // Register WorkerId through repository (ZooKeeper or cache fallback)
-            WorkerId workerId = workerIdRepository.registerWorkerId(serviceName);
+            WorkerId workerId = workerIdRepository.registerWorkerId();
             log.info("Successfully registered WorkerId: {}", workerId.value());
             
             // Record successful registration
@@ -167,12 +161,12 @@ public class SnowflakeDomainService {
      */
     public SnowflakeId generateId() {
         if (!accepting) {
-            throw new IdGenerationException(IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
+            throw new IdGenerationException(IdGenerationException.ErrorCode.SERVICE_SHUTTING_DOWN,
                     "Service is shutting down, not accepting new requests");
         }
 
         if (worker == null) {
-            throw new IdGenerationException(IdGenerationException.ErrorCode.CACHE_NOT_INITIALIZED,
+            throw new IdGenerationException(IdGenerationException.ErrorCode.SNOWFLAKE_NOT_INITIALIZED,
                     "SnowflakeWorker not initialized");
         }
 
@@ -296,7 +290,7 @@ public class SnowflakeDomainService {
      * 1. Stop accepting new requests
      * 2. Wait for in-flight requests (max 100ms)
      * 3. Persist last used timestamp
-     * 4. Release WorkerId (mark ZooKeeper node as offline)
+     * 4. Release WorkerId
      */
     @PreDestroy
     public void shutdown() {
@@ -330,9 +324,9 @@ public class SnowflakeDomainService {
             log.info("Persisted last used timestamp: {}", lastTimestamp);
         }
         
-        // Step 4: Release WorkerId (mark ZooKeeper node as offline)
+        // Step 4: Release WorkerId
         workerIdRepository.releaseWorkerId();
-        log.info("Released WorkerId and marked ZooKeeper node as offline");
+        log.info("Released WorkerId");
         
         log.info("Graceful shutdown of SnowflakeDomainService completed");
     }

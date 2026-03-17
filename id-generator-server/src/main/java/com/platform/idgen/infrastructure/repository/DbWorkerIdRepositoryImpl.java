@@ -8,7 +8,6 @@ import com.platform.idgen.infrastructure.persistence.mapper.WorkerIdAllocMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Repository;
@@ -34,17 +33,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * 基于数据库的 Worker ID 分配实现。
  * 通过 SELECT ... FOR UPDATE SKIP LOCKED 抢占空闲 Worker ID，
- * 并使用定时任务续期租约，替代 ZooKeeper 方案。
+ * 并使用定时任务续期租约，作为当前唯一的 Worker ID 分配实现。
  */
 @Repository
-@ConditionalOnProperty(name = "id-generator.snowflake.enable-zookeeper", havingValue = "false")
 public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
 
     private static final Logger log = LoggerFactory.getLogger(DbWorkerIdRepositoryImpl.class);
 
     private static final String WORKER_ID_KEY = "workerId";
     private static final String DATACENTER_ID_KEY = "datacenterId";
-    private static final String SEQUENCE_NUMBER_KEY = "zkSequenceNumber";
+    private static final String SEQUENCE_NUMBER_KEY = "allocationSequenceNumber";
     private static final String LAST_TIMESTAMP_KEY = "lastTimestamp";
 
     /**
@@ -97,7 +95,7 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     }
 
     @Override
-    public WorkerId registerWorkerId(String serviceName) throws WorkerIdUnavailableException {
+    public WorkerId registerWorkerId() throws WorkerIdUnavailableException {
         // 优先使用静态配置的 Worker ID
         if (snowflakeProperties.getWorkerId() >= 0) {
             registeredWorkerId = new WorkerId(snowflakeProperties.getWorkerId());
@@ -114,7 +112,7 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
             WorkerId workerId = self().acquireFromDatabase();
             if (workerId != null) {
                 registeredWorkerId = workerId;
-                // DB 模式下无 ZK 序列号，传 -1 标识
+                // DB 模式下没有额外分配序号，传 -1 作为占位元数据
                 cacheWorkerId(workerId, snowflakeProperties.getDatacenterId(), -1);
 
                 // 预分配备用 Worker ID，用于时钟回拨时切换
@@ -126,21 +124,12 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
                 return workerId;
             }
         } catch (Exception e) {
-            log.warn("数据库抢占 WorkerId 失败，尝试本地缓存降级", e);
-        }
-
-        // 降级到本地缓存
-        Optional<WorkerId> cached = loadCachedWorkerId();
-        if (cached.isPresent()) {
-            registeredWorkerId = cached.get();
-            // DB 模式下使用本地缓存降级，该 ID 可能已被其他实例占用，存在 ID 冲突风险
-            log.warn("DB 模式下使用本地缓存降级恢复 Worker ID {}，该 ID 可能已被其他实例占用，存在 ID 冲突风险",
-                    registeredWorkerId.value());
-            return registeredWorkerId;
+            throw new WorkerIdUnavailableException(
+                    "数据库模式下无法从数据库抢占 WorkerId，已拒绝使用本地缓存降级", e);
         }
 
         throw new WorkerIdUnavailableException(
-                "无法从数据库获取 WorkerId，且本地缓存不可用");
+                "数据库模式下没有可用的 WorkerId，已拒绝使用本地缓存降级");
     }
 
     /**
@@ -370,7 +359,7 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
     }
 
     @Override
-    public void cacheWorkerId(WorkerId workerId, long datacenterId, long zkSequenceNumber) {
+    public void cacheWorkerId(WorkerId workerId, long datacenterId, long allocationSequence) {
         Path cachePath = Paths.get(snowflakeProperties.getWorkerIdCachePath());
 
         try {
@@ -379,7 +368,7 @@ public class DbWorkerIdRepositoryImpl implements WorkerIdRepository {
             Properties props = new Properties();
             props.setProperty(WORKER_ID_KEY, String.valueOf(workerId.value()));
             props.setProperty(DATACENTER_ID_KEY, String.valueOf(datacenterId));
-            props.setProperty(SEQUENCE_NUMBER_KEY, String.valueOf(zkSequenceNumber));
+            props.setProperty(SEQUENCE_NUMBER_KEY, String.valueOf(allocationSequence));
 
             try (OutputStream os = Files.newOutputStream(cachePath)) {
                 props.store(os, "WorkerId Cache");

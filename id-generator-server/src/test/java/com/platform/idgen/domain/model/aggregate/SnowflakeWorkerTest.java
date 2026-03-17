@@ -12,9 +12,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.lang.reflect.Field;
 import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -91,10 +94,11 @@ class SnowflakeWorkerTest {
     @Test
     @DisplayName("同一毫秒内连续生成的 ID 应单调递增")
     void 同一毫秒内生成的ID应递增() {
-        // 连续快速生成，大概率落在同一毫秒
-        long prev = worker.generateId().getId().value();
+        SnowflakeWorker sameMillisecondWorker = newWorker(() -> 1_000_000L, millis -> {});
+
+        long prev = sameMillisecondWorker.generateId().getId().value();
         for (int i = 0; i < 100; i++) {
-            long curr = worker.generateId().getId().value();
+            long curr = sameMillisecondWorker.generateId().getId().value();
             assertThat(curr)
                     .as("第 %d 次生成的 ID 应大于前一个", i + 1)
                     .isGreaterThan(prev);
@@ -108,21 +112,22 @@ class SnowflakeWorkerTest {
 
     @Test
     @DisplayName("同一毫秒内生成超过 4096 个 ID 时应等待下一毫秒（sequenceOverflow=true）")
-    void sequence溢出时等待下一毫秒() {
-        // 连续生成 MAX_SEQUENCE + 2 个 ID，其中必有一次触发 overflow
-        boolean overflowOccurred = false;
-        // 生成足够多的 ID 以触发 sequence 溢出
-        final int generateCount = (int) (MAX_SEQUENCE + 2);
-        for (int i = 0; i < generateCount; i++) {
-            SnowflakeWorker.GenerateResult result = worker.generateId();
-            if (result.isSequenceOverflow()) {
-                overflowOccurred = true;
-                break;
-            }
-        }
-        assertThat(overflowOccurred)
-                .as("生成 %d 个 ID 后应触发至少一次 sequence overflow", generateCount)
-                .isTrue();
+    void sequence溢出时等待下一毫秒() throws Exception {
+        AtomicLong now = new AtomicLong(1_000L);
+        AtomicLong readCount = new AtomicLong(0);
+        SnowflakeWorker overflowWorker = newWorker(
+                () -> readCount.getAndIncrement() == 0 ? now.get() : now.incrementAndGet(),
+                millis -> {}
+        );
+
+        setField(overflowWorker, "lastTimestamp", 1_000L);
+        setField(overflowWorker, "sequence", MAX_SEQUENCE);
+
+        SnowflakeWorker.GenerateResult result = overflowWorker.generateId();
+
+        assertThat(result.isSequenceOverflow()).isTrue();
+        assertThat(result.getId().getTimestamp(TEST_EPOCH)).isEqualTo(1_001L);
+        assertThat(result.getId().getSequence()).isZero();
     }
 
     @Test
@@ -147,32 +152,24 @@ class SnowflakeWorkerTest {
     @Test
     @DisplayName("小时钟回拨（≤5ms）等待后正常生成 ID")
     void 小时钟回拨等待后正常生成() throws Exception {
-        // 使用可控时钟的子类来模拟时钟回拨
-        long[] clockRef = {1_000_000L};  // 可变时钟引用
-
-        WorkerTimestampCache mockCache = mock(WorkerTimestampCache.class);
-        when(mockCache.loadLastUsedTimestamp()).thenReturn(Optional.empty());
-
-        // 使用自定义子类覆盖 getCurrentTimestamp（通过反射注入时钟）
-        // 由于 SnowflakeWorker 使用 System.currentTimeMillis()，
-        // 这里通过构造一个"已有 lastTimestamp"的场景来触发小回拨路径：
-        // 先生成一个 ID 建立 lastTimestamp，然后用 clockBackwardsWaitThresholdMs=0 的 worker
-        // 验证小回拨（offset=0 时不等待）不抛异常
-
-        // 构造一个阈值为 100ms 的 worker，确保正常时钟波动不会触发大回拨异常
-        SnowflakeWorker tolerantWorker = new SnowflakeWorker(
-                new WorkerId(2),
-                new DatacenterId(1),
-                TEST_EPOCH,
-                mockCache,
-                SMALL_BACKWARDS_THRESHOLD_MS,
-                5000L
+        AtomicLong now = new AtomicLong(997L);
+        AtomicLong slept = new AtomicLong(0L);
+        SnowflakeWorker tolerantWorker = newWorker(
+                now::get,
+                millis -> {
+                    slept.set(millis);
+                    now.addAndGet(millis);
+                }
         );
 
-        // 正常生成 ID，不应抛出异常
+        setField(tolerantWorker, "lastTimestamp", 1_000L);
+
         SnowflakeWorker.GenerateResult result = tolerantWorker.generateId();
-        assertThat(result.getId()).isNotNull();
-        assertThat(result.getId().value()).isPositive();
+
+        assertThat(slept.get()).isEqualTo(3L);
+        assertThat(result.getId().getTimestamp(TEST_EPOCH)).isEqualTo(1_000L);
+        assertThat(result.getId().getSequence()).isEqualTo(1);
+        assertThat(tolerantWorker.getLastTimestamp()).isEqualTo(1_000L);
     }
 
     // ================================================================
@@ -181,42 +178,23 @@ class SnowflakeWorkerTest {
 
     @Test
     @DisplayName("大时钟回拨（>5ms）应抛出 ClockBackwardsException")
-    void 大时钟回拨应抛出异常() {
-        // 构造一个阈值极小（0ms）的 worker，使任何回拨都触发大回拨异常
-        WorkerTimestampCache mockCache = mock(WorkerTimestampCache.class);
-        // 注入一个比当前时间大很多的 lastTimestamp，模拟大回拨场景
-        long futureTimestamp = System.currentTimeMillis() - TEST_EPOCH + 60_000L; // 当前时间 + 60s
-        when(mockCache.loadLastUsedTimestamp()).thenReturn(Optional.of(futureTimestamp));
-
-        // maxStartupWaitMs=0 使启动等待超限，直接用当前时间（避免 sleep）
-        // 然后 lastTimestamp 被设为 currentTimestamp，但 futureTimestamp 已经很大
-        // 改用阈值=0ms 的 worker，任何回拨都触发大回拨
-        WorkerTimestampCache mockCache2 = mock(WorkerTimestampCache.class);
-        when(mockCache2.loadLastUsedTimestamp()).thenReturn(Optional.empty());
-        doNothing().when(mockCache2).saveLastUsedTimestamp(anyLong());
+    void 大时钟回拨应抛出异常() throws Exception {
+        WorkerTimestampCache strictCache = mock(WorkerTimestampCache.class);
+        when(strictCache.loadLastUsedTimestamp()).thenReturn(Optional.empty());
+        doNothing().when(strictCache).saveLastUsedTimestamp(anyLong());
 
         SnowflakeWorker strictWorker = new SnowflakeWorker(
                 new WorkerId(3),
                 new DatacenterId(1),
                 TEST_EPOCH,
-                mockCache2,
-                0L,   // 阈值=0ms，任何回拨都视为大回拨
-                5000L
+                strictCache,
+                SMALL_BACKWARDS_THRESHOLD_MS,
+                5000L,
+                () -> 1_000L,
+                millis -> {}
         );
 
-        // 先生成一个 ID 建立 lastTimestamp
-        strictWorker.generateId();
-
-        // 通过反射将 lastTimestamp 设置为未来时间，模拟大回拨
-        try {
-            java.lang.reflect.Field lastTsField = SnowflakeWorker.class.getDeclaredField("lastTimestamp");
-            lastTsField.setAccessible(true);
-            long currentTs = System.currentTimeMillis() - TEST_EPOCH;
-            // 设置 lastTimestamp 为当前时间 + LARGE_BACKWARDS_OFFSET_MS，触发大回拨
-            lastTsField.set(strictWorker, currentTs + LARGE_BACKWARDS_OFFSET_MS);
-        } catch (Exception e) {
-            throw new RuntimeException("反射设置 lastTimestamp 失败", e);
-        }
+        setField(strictWorker, "lastTimestamp", 1_000L + LARGE_BACKWARDS_OFFSET_MS);
 
         assertThatThrownBy(strictWorker::generateId)
                 .isInstanceOf(ClockBackwardsException.class)
@@ -226,7 +204,7 @@ class SnowflakeWorkerTest {
                 });
 
         // 验证大回拨时调用了 saveLastUsedTimestamp
-        verify(mockCache2, atLeastOnce()).saveLastUsedTimestamp(anyLong());
+        verify(strictCache).saveLastUsedTimestamp(1_000L + LARGE_BACKWARDS_OFFSET_MS);
     }
 
     // ================================================================
@@ -288,5 +266,24 @@ class SnowflakeWorkerTest {
         }
 
         assertThat(allIds).hasSize(countPerPhase * 2);
+    }
+
+    private SnowflakeWorker newWorker(LongSupplier timeSource, SnowflakeWorker.Sleeper sleeper) {
+        return new SnowflakeWorker(
+                new WorkerId(DEFAULT_WORKER_ID),
+                new DatacenterId(DEFAULT_DATACENTER_ID),
+                TEST_EPOCH,
+                cache,
+                SMALL_BACKWARDS_THRESHOLD_MS,
+                5000L,
+                timeSource,
+                sleeper
+        );
+    }
+
+    private static void setField(SnowflakeWorker worker, String fieldName, long value) throws Exception {
+        Field field = SnowflakeWorker.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(worker, value);
     }
 }

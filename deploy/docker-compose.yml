@@ -1,106 +1,40 @@
-# =====================================================
-# ID Generator Deployment Configuration
-# For use with IM System and other services
-# =====================================================
-
 services:
-  # =====================================================
-  # PostgreSQL - ID Generator Database
-  # =====================================================
-  id-generator-postgres:
+  id-generator-db-init:
     image: postgres:16-alpine
-    container_name: id-generator-postgres
+    container_name: id-generator-db-init
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-id_generator}
-      POSTGRES_USER: ${POSTGRES_USER:-id_gen_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-id_gen_password}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
-    ports:
-      - "${POSTGRES_PORT:-5436}:5432"
+      - DB_HOST=${DB_HOST:-shared-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-id_generator}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123456}
+    entrypoint: ["/bin/sh", "/scripts/init-id-generator-db.sh"]
     volumes:
-      - id_generator_postgres_data:/var/lib/postgresql/data
-      - ../sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../docker/init-id-generator-db.sh:/scripts/init-id-generator-db.sh:ro
+      - ../docker/schema/schema.sql:/schema/schema.sql:ro
     networks:
-      - id-generator-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-id_gen_user} -d ${POSTGRES_DB:-id_generator}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
+      - shared-infra
+    restart: "no"
 
-  # =====================================================
-  # ZooKeeper - Distributed Coordination
-  # =====================================================
-  id-generator-zookeeper:
-    image: zookeeper:3.8
-    container_name: id-generator-zookeeper
-    environment:
-      ZOO_MY_ID: 1
-      ZOO_SERVERS: server.1=id-generator-zookeeper:2888:3888;2181
-      ZOO_TICK_TIME: 2000
-      ZOO_INIT_LIMIT: 10
-      ZOO_SYNC_LIMIT: 5
-      ZOO_MAX_CLIENT_CNXNS: 60
-      ZOO_STANDALONE_ENABLED: true
-      ZOO_ADMINSERVER_ENABLED: true
-    ports:
-      - "${ZOOKEEPER_PORT:-2182}:2181"
-      - "${ZOOKEEPER_ADMIN_PORT:-8889}:8080"
-    volumes:
-      - id_generator_zookeeper_data:/data
-      - id_generator_zookeeper_datalog:/datalog
-      - id_generator_zookeeper_logs:/logs
-    networks:
-      - id-generator-network
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/localhost/2181' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
-
-  # =====================================================
-  # ID Generator Server
-  # =====================================================
   id-generator-server:
     build:
-      context: ../id-generator-server
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     image: id-generator-server:latest
     container_name: id-generator-server
     environment:
-      # Java Options
       - JAVA_OPTS=${JAVA_OPTS:--Xms256m -Xmx512m -XX:+UseG1GC}
-      
-      # Database Configuration
-      - DB_HOST=id-generator-postgres
-      - DB_PORT=5432
-      - DB_USER=${POSTGRES_USER:-id_gen_user}
-      - DB_PASSWORD=${POSTGRES_PASSWORD:-id_gen_password}
-      - DB_NAME=${POSTGRES_DB:-id_generator}
-      
-      # ZooKeeper Configuration
-      - ZOOKEEPER_CONNECTION_STRING=id-generator-zookeeper:2181
-      - ENABLE_ZOOKEEPER=${ENABLE_ZOOKEEPER:-true}
-      
-      # Snowflake Configuration
+      - DB_HOST=${DB_HOST:-shared-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-id_generator}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres123456}
       - DATACENTER_ID=${DATACENTER_ID:-0}
       - WORKER_ID=${WORKER_ID:--1}
       - SNOWFLAKE_EPOCH=${SNOWFLAKE_EPOCH:-1735689600000}
-      
-      # Clock Backwards Configuration
       - CLOCK_BACKWARDS_MAX_WAIT=${CLOCK_BACKWARDS_MAX_WAIT:-5}
-      - CLOCK_BACKWARDS_STARTUP_CHECK=${CLOCK_BACKWARDS_STARTUP_CHECK:-true}
-      - CLOCK_BACKWARDS_ZK_SYNC_INTERVAL=${CLOCK_BACKWARDS_ZK_SYNC_INTERVAL:-3000}
       - CLOCK_BACKWARDS_ALERT_THRESHOLD=${CLOCK_BACKWARDS_ALERT_THRESHOLD:-10}
-      
-      # Spring Profile
       - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-docker}
-      
-      # Worker ID Cache
       - WORKER_ID_CACHE_PATH=/data/leaf/workerID.properties
     ports:
       - "${SERVER_PORT:-8011}:8011"
@@ -108,14 +42,12 @@ services:
       - id_generator_data:/data
       - id_generator_logs:/app/logs
     networks:
-      - id-generator-network
+      - shared-infra
     depends_on:
-      id-generator-postgres:
-        condition: service_healthy
-      id-generator-zookeeper:
-        condition: service_healthy
+      id-generator-db-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8010/api/v1/id/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8011/api/v1/id/health | grep -q '\"status\":\"UP\"' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -125,31 +57,16 @@ services:
       resources:
         limits:
           memory: 768M
-          cpus: '1.0'
+          cpus: '2.0'
         reservations:
           memory: 256M
           cpus: '0.25'
 
-# =====================================================
-# Networks
-# =====================================================
 networks:
-  id-generator-network:
-    name: id-generator-network
-    driver: bridge
+  shared-infra:
+    external: true
 
-# =====================================================
-# Volumes
-# =====================================================
 volumes:
-  id_generator_postgres_data:
-    name: id_generator_postgres_data
-  id_generator_zookeeper_data:
-    name: id_generator_zookeeper_data
-  id_generator_zookeeper_datalog:
-    name: id_generator_zookeeper_datalog
-  id_generator_zookeeper_logs:
-    name: id_generator_zookeeper_logs
   id_generator_data:
     name: id_generator_data
   id_generator_logs:

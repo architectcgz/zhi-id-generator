@@ -1,6 +1,10 @@
 package com.platform.idgen.interfaces.rest;
 
 import com.platform.idgen.application.IdGeneratorApplicationService;
+import com.platform.idgen.application.dto.HealthStatus;
+import com.platform.idgen.application.dto.SegmentCacheInfo;
+import com.platform.idgen.application.dto.SnowflakeInfo;
+import com.platform.idgen.application.dto.SnowflakeParseInfo;
 import com.platform.idgen.interfaces.rest.dto.ApiResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -8,7 +12,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * ID Generator REST API
@@ -20,6 +23,9 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/v1/id")
 public class IdGeneratorController {
+
+    private static final int MAX_BATCH_COUNT = 1000;
+    private static final int MAX_BIZ_TAG_LENGTH = 128;
     
     private static final Logger log = LoggerFactory.getLogger(IdGeneratorController.class);
     
@@ -48,12 +54,7 @@ public class IdGeneratorController {
     @GetMapping("/snowflake/batch")
     public ResponseEntity<ApiResponse<List<Long>>> getBatchSnowflakeIds(
             @RequestParam(defaultValue = "10") int count) {
-        if (count <= 0) {
-            throw new IllegalArgumentException("Count must be greater than 0");
-        }
-        if (count > 1000) {
-            throw new IllegalArgumentException("Count must not exceed 1000");
-        }
+        validateBatchCount(count);
         List<Long> ids = applicationService.generateBatchSnowflakeIds(count);
         return ResponseEntity.ok(ApiResponse.success(ids));
     }
@@ -63,11 +64,9 @@ public class IdGeneratorController {
      * GET /api/v1/id/snowflake/parse/{id}
      */
     @GetMapping("/snowflake/parse/{id}")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> parseSnowflakeId(@PathVariable long id) {
-        if (id <= 0) {
-            throw new IllegalArgumentException("ID must be a positive number");
-        }
-        Map<String, Object> parsedInfo = applicationService.parseSnowflakeId(id);
+    public ResponseEntity<ApiResponse<SnowflakeParseInfo>> parseSnowflakeId(@PathVariable long id) {
+        validatePositiveId(id);
+        SnowflakeParseInfo parsedInfo = applicationService.parseSnowflakeId(id);
         return ResponseEntity.ok(ApiResponse.success(parsedInfo));
     }
     
@@ -76,8 +75,8 @@ public class IdGeneratorController {
      * GET /api/v1/id/snowflake/info
      */
     @GetMapping("/snowflake/info")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> getSnowflakeInfo() {
-        Map<String, Object> info = applicationService.getSnowflakeInfo();
+    public ResponseEntity<ApiResponse<SnowflakeInfo>> getSnowflakeInfo() {
+        SnowflakeInfo info = applicationService.getSnowflakeInfo();
         return ResponseEntity.ok(ApiResponse.success(info));
     }
     
@@ -89,12 +88,7 @@ public class IdGeneratorController {
      */
     @GetMapping("/segment/{bizTag}")
     public ResponseEntity<ApiResponse<Long>> getSegmentId(@PathVariable String bizTag) {
-        if (bizTag == null || bizTag.isBlank()) {
-            throw new IllegalArgumentException("BizTag cannot be null or empty");
-        }
-        if (bizTag.length() > 128) {
-            throw new IllegalArgumentException("BizTag length must not exceed 128 characters");
-        }
+        validateBizTag(bizTag);
         long id = applicationService.generateSegmentId(bizTag);
         return ResponseEntity.ok(ApiResponse.success(id));
     }
@@ -107,18 +101,8 @@ public class IdGeneratorController {
     public ResponseEntity<ApiResponse<List<Long>>> getBatchSegmentIds(
             @PathVariable String bizTag,
             @RequestParam(defaultValue = "10") int count) {
-        if (bizTag == null || bizTag.isBlank()) {
-            throw new IllegalArgumentException("BizTag cannot be null or empty");
-        }
-        if (bizTag.length() > 128) {
-            throw new IllegalArgumentException("BizTag length must not exceed 128 characters");
-        }
-        if (count <= 0) {
-            throw new IllegalArgumentException("Count must be greater than 0");
-        }
-        if (count > 1000) {
-            throw new IllegalArgumentException("Count must not exceed 1000");
-        }
+        validateBizTag(bizTag);
+        validateBatchCount(count);
         List<Long> ids = applicationService.generateBatchSegmentIds(bizTag, count);
         return ResponseEntity.ok(ApiResponse.success(ids));
     }
@@ -138,14 +122,9 @@ public class IdGeneratorController {
      * GET /api/v1/id/cache/{bizTag}
      */
     @GetMapping("/cache/{bizTag}")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> getCacheInfo(@PathVariable String bizTag) {
-        if (bizTag == null || bizTag.isBlank()) {
-            throw new IllegalArgumentException("BizTag cannot be null or empty");
-        }
-        if (bizTag.length() > 128) {
-            throw new IllegalArgumentException("BizTag length must not exceed 128 characters");
-        }
-        Map<String, Object> cacheInfo = applicationService.getSegmentCacheInfo(bizTag);
+    public ResponseEntity<ApiResponse<SegmentCacheInfo>> getCacheInfo(@PathVariable String bizTag) {
+        validateBizTag(bizTag);
+        SegmentCacheInfo cacheInfo = applicationService.getSegmentCacheInfo(bizTag);
         return ResponseEntity.ok(ApiResponse.success(cacheInfo));
     }
     
@@ -154,10 +133,33 @@ public class IdGeneratorController {
      * GET /api/v1/id/health
      */
     @GetMapping("/health")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> health() {
-        Map<String, Object> healthStatus = applicationService.getHealthStatus();
-        healthStatus.put("service", "id-generator-service");
-        healthStatus.put("timestamp", System.currentTimeMillis());
+    public ResponseEntity<ApiResponse<HealthStatus>> health() {
+        HealthStatus healthStatus = applicationService.getHealthStatus();
         return ResponseEntity.ok(ApiResponse.success(healthStatus));
+    }
+
+    private void validateBizTag(String bizTag) {
+        if (bizTag == null || bizTag.isBlank()) {
+            throw new IllegalArgumentException("BizTag cannot be null or empty");
+        }
+        if (bizTag.length() > MAX_BIZ_TAG_LENGTH) {
+            throw new IllegalArgumentException(
+                    "BizTag length must not exceed " + MAX_BIZ_TAG_LENGTH + " characters");
+        }
+    }
+
+    private void validateBatchCount(int count) {
+        if (count <= 0) {
+            throw new IllegalArgumentException("Count must be greater than 0");
+        }
+        if (count > MAX_BATCH_COUNT) {
+            throw new IllegalArgumentException("Count must not exceed " + MAX_BATCH_COUNT);
+        }
+    }
+
+    private void validatePositiveId(long id) {
+        if (id <= 0) {
+            throw new IllegalArgumentException("ID must be a positive number");
+        }
     }
 }

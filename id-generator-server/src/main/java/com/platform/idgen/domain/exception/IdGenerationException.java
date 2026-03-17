@@ -18,7 +18,10 @@ public class IdGenerationException extends RuntimeException {
         CLOCK_BACKWARDS(50001, "Clock moved backwards"),
         WORKER_ID_UNAVAILABLE(50303, "WorkerId unavailable"),
         /** Worker ID 租约续期失败，当前 Worker ID 可能已被其他实例占用 */
-        WORKER_ID_INVALID(50304, "Worker ID is invalid, lease renewal failed");
+        WORKER_ID_INVALID(50304, "Worker ID is invalid, lease renewal failed"),
+        SEGMENT_UPDATE_FAILED(50305, "Segment allocation update failed"),
+        SERVICE_SHUTTING_DOWN(50306, "Service is shutting down"),
+        SNOWFLAKE_NOT_INITIALIZED(50307, "Snowflake worker not initialized");
         
         private final int code;
         private final String message;
@@ -49,6 +52,11 @@ public class IdGenerationException extends RuntimeException {
     
     public IdGenerationException(ErrorCode errorCode, Throwable cause) {
         super(errorCode.getMessage(), cause);
+        this.errorCode = errorCode;
+    }
+
+    public IdGenerationException(ErrorCode errorCode, String additionalMessage, Throwable cause) {
+        super(errorCode.getMessage() + ": " + additionalMessage, cause);
         this.errorCode = errorCode;
     }
     
