@@ -30,8 +30,8 @@ echo ""
 echo "=== ID Generator Server ==="
 if docker-compose ps id-generator-server 2>/dev/null | grep -q "Up"; then
     echo "Status: Running ✓"
-    if curl -s http://localhost:8011/actuator/health > /dev/null 2>&1; then
-        HEALTH=$(curl -s http://localhost:8011/actuator/health | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+    if curl -s http://localhost:8011/api/v1/id/health > /dev/null 2>&1; then
+        HEALTH=$(curl -s http://localhost:8011/api/v1/id/health | grep -o '"status":"[^"]*"' | head -n 1 | cut -d'"' -f4)
         echo "Health: $HEALTH"
     else
         echo "Health: Cannot connect ✗"
@@ -43,10 +43,10 @@ echo ""
 
 # Check additional instances if running
 for port in 8012 8013; do
-    if curl -s http://localhost:$port/actuator/health > /dev/null 2>&1; then
+    if curl -s http://localhost:$port/api/v1/id/health > /dev/null 2>&1; then
         echo "=== ID Generator Server (port $port) ==="
         echo "Status: Running ✓"
-        HEALTH=$(curl -s http://localhost:$port/actuator/health | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+        HEALTH=$(curl -s http://localhost:$port/api/v1/id/health | grep -o '"status":"[^"]*"' | head -n 1 | cut -d'"' -f4)
         echo "Health: $HEALTH"
         echo ""
     fi

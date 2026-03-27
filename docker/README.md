@@ -41,9 +41,8 @@ id-generator/docker/
 ### 单实例
 
 ```bash
-# 先在仓库根目录构建可执行服务端 JAR
-cd /home/azhi/workspace/projects/id-generator
-mvn -q -pl id-generator-server -am -DskipTests package
+# 确保 Go 版服务源码仓库存在
+ls /home/azhi/workspace/projects/zhi-id-generator-go
 
 # 启动共享基础设施
 cd /home/azhi/workspace/projects/infra
@@ -58,9 +57,8 @@ docker compose -f docker-compose.shared.yml up -d
 ### 扩缩容
 
 ```bash
-# 先在仓库根目录构建可执行服务端 JAR
-cd /home/azhi/workspace/projects/id-generator
-mvn -q -pl id-generator-server -am -DskipTests package
+# 确保 Go 版服务源码仓库存在
+ls /home/azhi/workspace/projects/zhi-id-generator-go
 
 # 启动共享基础设施
 cd /home/azhi/workspace/projects/infra
@@ -88,9 +86,8 @@ docker compose -f docker-compose.scale.yml up -d --scale id-generator=2
 ### Linux / Mac
 
 ```bash
-# 先在仓库根目录构建可执行服务端 JAR
-cd ..
-mvn -q -pl id-generator-server -am -DskipTests package
+# 确保 Go 版服务源码仓库存在
+ls /home/azhi/workspace/projects/zhi-id-generator-go
 
 cd docker/scripts
 chmod +x *.sh

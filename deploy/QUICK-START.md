@@ -6,9 +6,8 @@
 **适用场景**: 开发、测试、小规模应用
 
 ```powershell
-# 先在仓库根目录构建可执行服务端 JAR
-cd ..
-mvn -q -pl id-generator-server -am -DskipTests package
+# 确保 Go 版服务源码仓库存在
+dir ..\..\zhi-id-generator-go
 
 # 确保共享基础设施已启动（与 file-service 一致）
 cd ..\infra
@@ -29,6 +28,9 @@ docker compose up -d
 **适用场景**: 所有生产环境
 
 ```bash
+# 确保 Go 版服务源码仓库存在
+ls /home/azhi/workspace/projects/zhi-id-generator-go
+
 # 启动 2 个实例（8011 为 Nginx 统一入口，实例直连从 8012 开始）
 # 确保共享基础设施已启动
 cd /home/azhi/workspace/projects/infra
@@ -54,9 +56,8 @@ docker compose -f docker-compose.scale.yml up -d --scale id-generator=2
 #### 第一步：启动服务
 
 ```bash
-# 先在仓库根目录构建可执行服务端 JAR
-cd ..
-mvn -q -pl id-generator-server -am -DskipTests package
+# 确保 Go 版服务源码仓库存在
+ls /home/azhi/workspace/projects/zhi-id-generator-go
 
 # 确保共享基础设施已启动（shared-postgres/shared-redis/shared-infra）
 cd /home/azhi/workspace/projects/infra

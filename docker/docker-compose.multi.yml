@@ -5,17 +5,15 @@ services:
   # Second ID Generator Server instance
   id-generator-server-2:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: ../../zhi-id-generator-go
+      dockerfile: Dockerfile
     container_name: id-generator-server-2
     environment:
-      DB_HOST: id-generator-postgres
-      DB_PORT: 5432
-      DB_USER: id_gen_user
-      DB_PASSWORD: id_gen_password
+      HTTP_ADDR: :8011
+      DATABASE_URL: postgres://id_gen_user:id_gen_password@id-generator-postgres:5432/id_generator?sslmode=disable
       DATACENTER_ID: 0
       WORKER_ID: -1
-      SPRING_PROFILES_ACTIVE: docker
+      SNOWFLAKE_EPOCH: 1735689600000
     ports:
       - "8012:8011"
     depends_on:
@@ -28,17 +26,15 @@ services:
   # Third ID Generator Server instance
   id-generator-server-3:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: ../../zhi-id-generator-go
+      dockerfile: Dockerfile
     container_name: id-generator-server-3
     environment:
-      DB_HOST: id-generator-postgres
-      DB_PORT: 5432
-      DB_USER: id_gen_user
-      DB_PASSWORD: id_gen_password
+      HTTP_ADDR: :8011
+      DATABASE_URL: postgres://id_gen_user:id_gen_password@id-generator-postgres:5432/id_generator?sslmode=disable
       DATACENTER_ID: 0
       WORKER_ID: -1
-      SPRING_PROFILES_ACTIVE: docker
+      SNOWFLAKE_EPOCH: 1735689600000
     ports:
       - "8013:8011"
     depends_on:
